@@ -1,10 +1,3 @@
-// controllers/hospitalController.js
-// CRUD for hospitals (total beds, ambulances, location).
-// The C++ engine owns the live hospital (availability, dispatch); each change
-// is applied there first, then saved to MongoDB so it survives a restart.
-// New or bigger capacity can let waiting emergencies go straight away, and
-// those are saved too.
-
 const Hospital = require("../models/Hospital");
 const engine = require("../utils/cppEngine");
 const { cleanName, parseCount } = require("../utils/validators");
@@ -12,7 +5,7 @@ const { exclusive, applyUpdates, broadcast } = require("../utils/emergencyServic
 
 const MAX = engine.MAX_FACILITY_COUNT;
 
-// List hospitals with live availability
+
 async function getHospitals(req, res) {
   try {
     const result = await engine.getResources();
@@ -59,7 +52,7 @@ async function createHospital(req, res) {
       try {
         await Hospital.create({ name, location, totalBeds, totalAmbulances });
       } catch (dbError) {
-        await engine.hospitalDelete(name); // undo, so engine and database agree
+        await engine.hospitalDelete(name);
         throw dbError;
       }
 
@@ -77,7 +70,7 @@ async function createHospital(req, res) {
   }
 }
 
-// Any of location / totalBeds / totalAmbulances can be sent. The name is the id.
+
 async function updateHospital(req, res) {
   try {
     const existing = await Hospital.findOne({ name: req.params.name });
@@ -147,7 +140,7 @@ async function deleteHospital(req, res) {
       const outcome = await engine.hospitalDelete(req.params.name);
       if (!outcome.ok) return outcome;
 
-      // if this fails the hospital comes back on the next restart (MongoDB still has it)
+
       await Hospital.deleteOne({ name: req.params.name });
       return outcome;
     });

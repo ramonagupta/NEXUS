@@ -1,15 +1,8 @@
-// data/cityMap.mjs
-//
-// THE MAP OF DEHRADUN: the single source of truth for the whole project.
-//   - scripts/generate-city-data.mjs turns it into engine/city_data.h (the C++ engine routes on it)
-//   - GET /api/city/map sends it to the frontend, which only DRAWS what it receives
-// Change the map here, then run:  npm run generate:city && npm run build:engine
-
 export const MAP_SIZE = { width: 900, height: 560 };
 
 export const MAP_GEO = { refX: 450, refY: 285, refLat: 30.3165, refLng: 78.0322, latPerPx: 0.0002, lngPerPx: 0.000231 };
 
-// how the frontend should draw each kind of station (label, colour, letter on the pin)
+
 export const STATIONS = {
   police: { label: 'Police Station', hex: '#46637F', glyph: 'P' },
   fire: { label: 'Fire Station', hex: '#A83232', glyph: 'F' },
@@ -73,11 +66,11 @@ export const NODES = [
 
 export const NODE_MAP = Object.fromEntries(NODES.map((n) => [n.id, n]));
 
-// ---- roads ----
-// [from, to, bend, kind]   bend = how much the road curves (fraction of length)
-// kind: 'M' = major arterial, 's' = shortcut / lane, '' = regular
+
+
+
 const EDGE_DEFS = [
-  // Rajpur Road spine (NE → city centre)
+
   ['mussoorie', 'rajpur', 0.08, 'M'],
   ['rajpur', 'kaulagarh', 0.06, 'M'],
   ['kaulagarh', 'dalanwala', 0.08, 'M'],
@@ -87,13 +80,13 @@ const EDGE_DEFS = [
   ['mohkam', 'vasant', 0.12],
   ['maldevta', 'mussoorie', 0.12],
 
-  // City centre
+
   ['clock', 'rail', 0.08, 'M'],
   ['clock', 'nehru', -0.1],
   ['clock', 'karanpur', 0.07],
   ['karanpur', 'dalanwala', 0.1],
 
-  // Chakrata Road / west
+
   ['karanpur', 'ballupur', 0.1, 'M'],
   ['karanpur', 'patel', 0.12],
   ['ballupur', 'premnagar', 0.12, 'M'],
@@ -104,13 +97,13 @@ const EDGE_DEFS = [
   ['nathuawala', 'subhash', 0.1],
   ['nathuawala', 'haridwar', 0.12, 'M'],
 
-  // Patel Nagar / ISBT belt
+
   ['patel', 'majra', 0.1, 's'],
   ['majra', 'isbt', 0.1],
   ['rail', 'isbt', 0.1, 'M'],
   ['rail', 'nehru', 0.12],
 
-  // South: Haridwar Road / Clement Town / Ajabpur
+
   ['isbt', 'rispana', 0.15],
   ['nehru', 'rispana', 0.1],
   ['isbt', 'subhash', 0.1],
@@ -118,7 +111,7 @@ const EDGE_DEFS = [
   ['rispana', 'ajabpur', 0.1],
   ['ajabpur', 'harrawala', 0.1],
 
-  // East: IT Park / Sahastradhara Road / Raipur
+
   ['harrawala', 'arcadia', 0.1, 's'],
   ['arcadia', 'itpark', 0.1],
   ['itpark', 'sahast', 0.1],
@@ -126,7 +119,7 @@ const EDGE_DEFS = [
   ['raipurj', 'harrawala', 0.1],
   ['raipurj', 'sahastradhara', 0.1],
 
-  // extra connectors
+
   ['jakhan', 'maldevta', 0.1],
   ['jakhan', 'sahast', 0.08],
   ['sherpur', 'vasant', 0.08],
@@ -143,7 +136,7 @@ const EDGE_DEFS = [
   ['arcadia', 'nehru', 0.08, 's'],
   ['premnagar', 'bindal', 0.08],
 
-  // links for the stations
+
   ['h1', 'sherpur', 0.08],
   ['h1', 'mohkam', 0.08],
   ['h2', 'maldevta', 0.08],
@@ -180,16 +173,16 @@ const EDGE_DEFS = [
 
 const SAMPLES = 16;
 
-//   capacity = vehicles per km (set by road type) x road length in km, with a small per-road variation.
+
 const CAPACITY_PER_KM = { M: 60, '': 32, s: 18 };
 const MIN_CAPACITY = 20;
-const KM_PER_PX = 0.0225; // 900 px ~ 20 km
+const KM_PER_PX = 0.0225;
 
 function roadCapacity(kind, id, lengthPx) {
   const perKm = CAPACITY_PER_KM[kind] ?? CAPACITY_PER_KM[''];
-  let h = 2166136261; // hash of the road id: a road keeps the same variation even if the list is edited
+  let h = 2166136261;
   for (let c = 0; c < id.length; c++) h = Math.imul(h ^ id.charCodeAt(c), 16777619) >>> 0;
-  const variation = 0.9 + ((h % 1000) / 1000) * 0.2; // +/-10%
+  const variation = 0.9 + ((h % 1000) / 1000) * 0.2;
   return Math.max(MIN_CAPACITY, Math.round(perKm * lengthPx * KM_PER_PX * variation));
 }
 
@@ -237,7 +230,7 @@ export const RIVERS = [
   'M 770 -10 C 690 90 600 150 545 225 C 505 275 480 335 435 385 C 395 430 330 470 290 580',
 ];
 
-// Large faint sector names
+
 export const AREAS = [
   { name: 'RAJPUR ROAD', x: 600, y: 60 },
   { name: 'DALANWALA', x: 505, y: 195 },

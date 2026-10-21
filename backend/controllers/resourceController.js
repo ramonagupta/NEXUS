@@ -1,15 +1,3 @@
-// controllers/resourceController.js
-// CRUD for response resources: police stations (response units) and fire
-// stations (fire trucks). Ambulances are part of hospitals.
-// GET /api/resources is also what the frontend reads for its three resource cards.
-// The C++ engine owns the live resource and works out its status:
-//   available   = has free units
-//   busy        = every unit is out on a job
-//   unavailable = switched off by the admin
-// Each change is applied in the engine first, then saved to MongoDB. Adding a
-// resource, giving it more units or switching it back on can let waiting
-// emergencies go straight away, and those are saved too.
-
 const Resource = require("../models/Resource");
 const engine = require("../utils/cppEngine");
 const { cleanName, parseCount } = require("../utils/validators");
@@ -18,12 +6,12 @@ const { buildSummary } = require("../utils/resourceSummary");
 
 const MAX = engine.MAX_FACILITY_COUNT;
 
-// What the frontend reads (GET /api/resources):
-//   { medical: { available, total }, fire: {...}, police: {...},
-//     hospitals: [...], stations: [...] }
-// medical = the ambulances of all hospitals, fire = fire engines, police = police
-// units. The three totals feed the resource cards; hospitals / stations are the
-// live lists. Filters on the stations:  ?type=fire  ?status=busy
+
+
+
+
+
+
 async function getResources(req, res) {
   try {
     const { type, status } = req.query;
@@ -51,7 +39,7 @@ async function getResources(req, res) {
   }
 }
 
-// Totals for the three resource cards: { medical, fire, police } -> { available, total }
+
 async function getSummary(req, res) {
   try {
     res.json(await buildSummary());
@@ -71,7 +59,7 @@ async function getResourceByName(req, res) {
   }
 }
 
-// body: { name, type: "police" | "fire", location, capacity, status? }
+
 async function createResource(req, res) {
   try {
     const name = cleanName(req.body.name);
@@ -106,7 +94,7 @@ async function createResource(req, res) {
       try {
         await Resource.create({ name, type, location, capacity, outOfService });
       } catch (dbError) {
-        await engine.stationDelete(name); // undo, so engine and database agree
+        await engine.stationDelete(name);
         throw dbError;
       }
 
@@ -124,7 +112,7 @@ async function createResource(req, res) {
   }
 }
 
-// Any of location / capacity / status can be sent. The name and type can't change.
+
 async function updateResource(req, res) {
   try {
     const existing = await Resource.findOne({ name: req.params.name });
@@ -201,7 +189,7 @@ async function deleteResource(req, res) {
       const outcome = await engine.stationDelete(req.params.name);
       if (!outcome.ok) return outcome;
 
-      // if this fails the resource comes back on the next restart (MongoDB still has it)
+
       await Resource.deleteOne({ name: req.params.name });
       return outcome;
     });

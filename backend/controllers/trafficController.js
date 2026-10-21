@@ -1,15 +1,3 @@
-// controllers/trafficController.js
-// The shared traffic of the city. The C++ engine owns it: it generates the
-// starting traffic, sets one road's level, works out each road's level, colour and
-// slowdown. MongoDB keeps a copy so every screen (and every restart) sees the same.
-// Whenever it changes, the units already on their way are re-routed.
-//
-//   GET    /api/traffic              every road: load, capacity, ratio, level, colour, slowdown
-//   PUT    /api/traffic              replace the whole traffic: { "<road id>": vehicles }
-//   PATCH  /api/traffic/roads/:id    set ONE road: { level } or { level: "custom", ratio: 1.2 }
-//   POST   /api/traffic/randomize    new random traffic for the whole city  (optional { seed })
-//   POST   /api/traffic/clear        no traffic anywhere
-
 const engine = require("../utils/cppEngine");
 const trafficService = require("../utils/trafficService");
 
@@ -29,7 +17,7 @@ async function getTraffic(req, res) {
 
 async function saveTraffic(req, res) {
   try {
-    // the loads object itself; { traffic: {...} } / { data: {...} } also work
+
     let body = req.body;
     if (body && typeof body.traffic === "object") body = body.traffic;
     else if (body && typeof body.data === "object") body = body.data;
@@ -38,7 +26,7 @@ async function saveTraffic(req, res) {
       return res.status(400).json({ message: 'Send the traffic as an object: { "<road id>": vehicles }' });
     }
 
-    // the engine keeps only real roads with a whole number of vehicles (0 or more)
+
     await engine.setTraffic(body);
     await respond(res);
   } catch (error) {

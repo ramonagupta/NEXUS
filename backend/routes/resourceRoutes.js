@@ -1,4 +1,4 @@
-// routes/resourceRoutes.js
+
 
 const express = require("express");
 const router = express.Router();
@@ -12,7 +12,7 @@ const {
   deleteResource,
 } = require("../controllers/resourceController");
 
-router.get("/summary", getSummary); // before "/:name"
+router.get("/summary", getSummary);
 router.post("/", createResource);
 router.get("/", getResources);
 router.get("/:name", getResourceByName);
