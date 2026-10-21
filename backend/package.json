@@ -1,0 +1,25 @@
+{
+  "name": "nexus-backend",
+  "version": "1.0.0",
+  "description": "Backend for NEXUS - Emergency Management and Resource Optimisation System",
+  "main": "server.js",
+  "scripts": {
+    "build:engine": "g++ -std=c++17 -O2 -o engine/nexus_engine engine/nexus_engine.cpp",
+    "prestart": "npm run build:engine",
+    "start": "node server.js",
+    "predev": "npm run build:engine",
+    "dev": "nodemon server.js --ignore engine/",
+    "generate:city": "node scripts/generate-city-data.mjs",
+    "test": "npm run build:engine && node --test tests/flow.test.js",
+    "demo": "node scripts/demo.mjs"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "mongoose": "^8.5.0",
+    "dotenv": "^16.4.5",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}

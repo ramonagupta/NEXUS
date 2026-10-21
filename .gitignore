@@ -1,0 +1,5 @@
+node_modules
+dist
+.env
+backend/engine/nexus_engine
+backend/engine/nexus_engine.exe
