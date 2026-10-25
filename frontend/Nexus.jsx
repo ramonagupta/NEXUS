@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Header from './Header';
+import AuthScreen from './AuthScreen';
 import MapPanel from './MapPanel';
 import TrackerPanel from './TrackerPanel';
 import ReportsList from './ReportsList';
@@ -16,6 +17,22 @@ import './nexus.css';
 
 const POLL_MS = 2000;
 
+function withFollowedUnit(incident, followed) {
+  if (!incident || !followed) return incident;
+  const unit = (incident.units || []).find(
+    (u) => u.state === 'assigned' && u.service === followed.service && u.provider === followed.provider,
+  );
+  if (!unit) return incident;
+  return {
+    ...incident,
+    routePath: unit.routePath,
+    totalSeconds: unit.totalSeconds,
+    elapsedSeconds: unit.elapsedSeconds,
+    status: 'assigned',
+    displayStatus: 'ARRIVING',
+  };
+}
+
 export default function Nexus() {
   const [city, setCity] = useState(null); // the map to draw
   const [traffic, setTraffic] = useState(null);
@@ -26,6 +43,10 @@ export default function Nexus() {
   const [activeId, setActiveId] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
+  const [followed, setFollowed] = useState(null);
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [noticeOpen, setNoticeOpen] = useState(false); // shown once, right after logging in
   const [, setTick] = useState(0); // re-draw every second so the countdowns keep moving
 
   const lastStatus = useRef(null); // report id -> status we saw last time (null until the first load)
@@ -45,9 +66,9 @@ export default function Nexus() {
         const before = seen.get(e.id);
         if (before === undefined) continue;
         if (before === 'WAITING' && e.displayStatus !== 'WAITING' && e.displayStatus !== 'UNASSIGNED') {
-          pushToast(`"${e.title}" left the priority queue: a unit was sent from ${e.units?.find((u) => u.state === 'assigned')?.providerArea ?? 'a station'}.`, 'success');
+          pushToast(`"${e.title}" left the priority queue: a unit has been sent.`, 'success');
         } else if (before !== 'ON SCENE' && e.displayStatus === 'ON SCENE') {
-          pushToast(`UNIT ARRIVED: ${e.unitName} is on scene for "${e.title}"!`, 'warning');
+          pushToast(`UNIT ARRIVED: help is on scene for "${e.title}"!`, 'warning');
         }
       }
     }
@@ -78,14 +99,35 @@ export default function Nexus() {
     }
   }, [announceChanges]);
 
-  useEffect(() => { loadCity(); }, [loadCity]);
+  const resetSession = useCallback(() => {
+    setUser(null);
+    setCity(null);
+    setTraffic(null);
+    setEmergencies([]);
+    setResources(null);
+    setActiveId(null);
+    setFollowed(null);
+    setConnectionError(null);
+    setNoticeOpen(false);
+    lastStatus.current = null;
+  }, []);
 
   useEffect(() => {
-    if (!city) return undefined;
+    api.setUnauthorizedHandler(resetSession);
+    api.getMe()
+      .then(setUser)
+      .catch((err) => { if (err.status === 401) api.logout(); })
+      .finally(() => setAuthReady(true));
+  }, [resetSession]);
+
+  useEffect(() => { if (user) loadCity(); }, [user, loadCity]);
+
+  useEffect(() => {
+    if (!user || !city) return undefined;
     refresh();
     const poll = setInterval(refresh, POLL_MS);
     return () => clearInterval(poll);
-  }, [city, refresh]);
+  }, [user, city, refresh]);
 
   useEffect(() => {
     const t = setInterval(() => setTick((n) => n + 1), 1000);
@@ -121,7 +163,7 @@ export default function Nexus() {
     setIsModalOpen(false);
 
     if (saved.status === 'pending') {
-      pushToast(`No unit is free. "${saved.title}" is WAITING in the priority queue at position ${saved.queuePosition} (score ${saved.priorityScore}).`, 'warning');
+      pushToast(`No unit is free. "${saved.title}" is WAITING in the priority queue at position ${saved.queuePosition}.`, 'warning');
     } else if (saved.status === 'unassigned') {
       pushToast(`"${saved.title}" cannot be served: no station can take it (try fewer people).`, 'warning');
     } else {
@@ -151,13 +193,38 @@ export default function Nexus() {
     () => emergencies.find((e) => e.id === activeId) || null,
     [emergencies, activeId],
   );
+  const followedUnit = followed && followed.incidentId === activeId ? followed : null;
+  const mapIncident = useMemo(() => withFollowedUnit(activeIncident, followedUnit), [activeIncident, followedUnit]);
   const waiting = emergencies.filter((e) => e.displayStatus === 'WAITING').length;
+
+  function handleLogout() {
+    api.logout();
+    resetSession();
+  }
+
+  if (!authReady) {
+    return (
+      <div className="app-viewport">
+        <Header />
+        <div className="backend-screen"><h2>Checking your session…</h2></div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="app-viewport">
+        <Header />
+        <AuthScreen onLoggedIn={(u) => { setUser(u); setNoticeOpen(true); }} />
+      </div>
+    );
+  }
 
   // ---- nothing to draw until the backend has sent the map ----
   if (!city || !traffic || !resources) {
     return (
       <div className="app-viewport">
-        <Header />
+        <Header user={user} onLogout={handleLogout} />
         <div className="backend-screen">
           {connectionError ? (
             <>
@@ -177,21 +244,27 @@ export default function Nexus() {
   return (
     <div className="app-viewport">
       <ToastContainer toasts={toasts} />
-      <Header />
+      <Header user={user} onLogout={handleLogout} />
       {connectionError && <div className="conn-banner">Backend connection lost: {connectionError}. Showing the last data received.</div>}
 
       <div className="main-stage">
         <MapPanel
           city={city}
           traffic={traffic}
-          activeIncident={activeIncident}
+          activeIncident={mapIncident}
           onSetRoadTraffic={handleSetRoadTraffic}
           onRandomizeTraffic={handleRandomTraffic}
           onClearTraffic={handleClearTraffic}
         />
 
         <div className="right-column">
-          <TrackerPanel activeIncident={activeIncident} city={city} onResolve={handleResolve} />
+          <TrackerPanel
+            activeIncident={activeIncident}
+            followedUnit={followedUnit}
+            onFollowUnit={(unit) => setFollowed(unit && { incidentId: activeId, ...unit })}
+            city={city}
+            onResolve={handleResolve}
+          />
           <ReportsList
             emergencies={emergencies}
             waiting={waiting}
@@ -203,6 +276,22 @@ export default function Nexus() {
       </div>
 
       <ResourceRow resources={resources} waiting={waiting} onOpenReport={() => setIsModalOpen(true)} />
+
+      {noticeOpen && (
+        <div className="modal-overlay">
+          <div className="modal notice-modal" role="alertdialog" aria-modal="true" aria-labelledby="notice-title">
+            <h2 id="notice-title">Before you start</h2>
+            <div className="auth-warning">
+              <strong>Emergency reporting only</strong>
+              <p>False reports can lead to legal action.</p>
+              <p>Your phone number is attached to every report you make.</p>
+            </div>
+            <div className="modal-actions">
+              <button type="button" className="btn-prim" autoFocus onClick={() => setNoticeOpen(false)}>I understand</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ReportModal open={isModalOpen} city={city} onClose={() => setIsModalOpen(false)} onSubmit={handleSubmit} />
     </div>
