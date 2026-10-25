@@ -36,7 +36,7 @@ export default function ReportsList({ emergencies, waiting, city, activeId, onSe
               </div>
               <div className="r-status-badge">
                 {isWaiting && <span className="queue-chip">QUEUE #{e.queuePosition}</span>}
-                SCORE {e.priorityScore} • STATUS: {e.displayStatus}
+                STATUS: {e.displayStatus}
                 {hasUnit
                   ? ` • ${e.isOnSite ? '⚡ ON-SITE RESPONSE' : `Total Est: ${formatDuration(e.totalSeconds)} (Traffic Delay: +${formatDuration(e.trafficDelaySeconds)})`}`
                   : isWaiting ? ' • waiting for a free unit' : ' • no station can take it'}
