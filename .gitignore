@@ -1,5 +1,18 @@
-node_modules
-dist
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+frontend/dist/
+
+# Environment variables and secrets
 .env
+.env.*
+!.env.example
+
+# Compiled C++ executables
 backend/engine/nexus_engine
 backend/engine/nexus_engine.exe
+
+# Logs
+*.log

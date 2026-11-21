@@ -11,7 +11,7 @@ then open http://localhost:5173 (see [README.md](README.md)).
 | fire engines | 9 (3 stations x 3) |
 | police units | 10 (5 stations x 2) |
 
-A medical or accident report needs **1 ambulance per 3 people** (7 people = 3 ambulances) and 1 bed per
+A medical report needs **1 ambulance per 3 people** (7 people = 3 ambulances) and 1 bed per
 person. A fire or police report needs 1 unit.
 **Priority score** = `people x 5` + 3 (medical) + 2 (fire) + 2 (police). Two fires: 1 person = **7**, 10 people = **52**.
 
@@ -26,13 +26,13 @@ Every report finds a free unit, is dispatched **at once**, and nothing waits.
 
 **In the browser**
 1. Click **Report Emergency**. Fill in: *Shop fire*, type **fire**, location *Clock Tower*, any address, **3** people. **Dispatch Unit**.
-2. Report again: *Road accident*, type **medical**, location *Railway Station*, **7** people.
+2. Report again: *Road crash*, type **medical**, location *Railway Station*, **7** people.
 3. Report again: *Robbery*, type **police**, location *Rajpur*, **1** person.
 
 **What you should see**
 - A green toast "Emergency dispatched!" for each, with the route and ETA.
 - Each report in the list has a status of **DISPATCH** (then ARRIVING, then ON SCENE) and **no `QUEUE #` badge**.
-- The accident says *3 ambulances* and the **Ambulances** card drops from 42/42 to **39/42**; Fire Engines 8/9; Police 9/10.
+- The crash says *3 ambulances* and the **Ambulances** card drops from 42/42 to **39/42**; Fire Engines 8/9; Police 9/10.
 - The bottom-right card still says "Request instant emergency dispatch" (no report is waiting).
 - `GET http://localhost:5000/api/emergencies/queue` returns `[]`.
 
@@ -107,3 +107,8 @@ curl -X DELETE http://localhost:5000/api/emergencies/<id of a dispatched fire>  
 - Hover or click a road, then **Heavy**: the backend sets its load, recalculates the slowdown and re-routes any unit
   already on its way (its ETA and "Traffic delay" change; a unit that was half way is still half way).
 - `GET http://localhost:5000/api/traffic` shows each road's load, level, colour and slowdown.
+
+
+> Sign-in: the API now needs a signed-in user. To run the demo script (or use `curl`) without signing in,
+> put `AUTH_REQUIRED=false` in `backend/.env`. With the frontend, sign up with any number: while
+> `SMS_PROVIDER=console` the code is printed in the backend log (and shown on screen if `DEV_RETURN_OTP=true`).

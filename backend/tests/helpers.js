@@ -56,9 +56,9 @@ function fakeRes() {
 }
 
 // call a controller function the way Express would
-async function call(fn, { body = {}, params = {}, query = {} } = {}) {
+async function call(fn, { body = {}, params = {}, query = {}, user } = {}) {
   const res = fakeRes();
-  await fn({ body, params, query }, res);
+  await fn({ body, params, query, user }, res);
   return res;
 }
 

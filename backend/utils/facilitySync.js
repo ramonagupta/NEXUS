@@ -1,6 +1,6 @@
 // utils/facilitySync.js
 // Keeps the C++ engine and MongoDB in step for the things that are saved:
-// hospitals, resources (police / fire stations), the control unit and the traffic.
+// hospitals, resources (police / fire stations), the control units and the traffic.
 // The engine starts with the built-in hospitals / stations from nexus.cpp.
 //
 //  - First run (nothing saved yet): save the engine's built-in ones to MongoDB.
@@ -81,32 +81,35 @@ async function syncFacilities() {
   );
 }
 
-// Same idea for the Central Medical Control unit: the first run saves the
-// engine's default one, later runs load the saved settings into the engine.
+// Same idea for the three control units (Central Medical / Fire / Police Control): the
+// first run saves the engine's default ones, later runs load the saved settings into the engine.
 async function syncControlUnit() {
-  const saved = await ControlUnit.findOne({});
-  const current = (await engine.getControlUnit()).controlUnit;
+  for (const kind of engine.CONTROL_KINDS) {
+    const saved = await ControlUnit.findOneOfKind(kind);
+    const current = (await engine.getControlUnit(kind)).controlUnit;
 
-  if (!saved) {
-    await ControlUnit.create({
-      name: current.name,
-      location: current.location,
-      online: current.online,
-    });
-    console.log("Saved default control unit: " + current.name);
-    return;
+    if (!saved) {
+      await ControlUnit.create({
+        kind,
+        name: current.name,
+        location: current.location,
+        online: current.online,
+      });
+      console.log("Saved default control unit: " + current.name);
+      continue;
+    }
+
+    // a saved location that isn't on this map goes back to the default one
+    if (!engine.isValidNode(saved.location)) {
+      console.log("Control unit location '" + saved.location + "' is not on this map, using '" + current.location + "'");
+      saved.location = current.location;
+      await saved.save();
+    }
+
+    const result = await engine.setControlUnit(saved.name, saved.location, saved.online, kind);
+    if (!result.ok) console.log("Could not load control unit " + kind + ": " + result.error);
+    else console.log("Loaded control unit: " + saved.name + (saved.online ? " (online)" : " (OFFLINE)"));
   }
-
-  // a saved location that isn't on this map goes back to the default one
-  if (!engine.isValidNode(saved.location)) {
-    console.log("Control unit location '" + saved.location + "' is not on this map, using '" + current.location + "'");
-    saved.location = current.location;
-    await saved.save();
-  }
-
-  const result = await engine.setControlUnit(saved.name, saved.location, saved.online);
-  if (!result.ok) console.log("Could not load control unit: " + result.error);
-  else console.log("Loaded control unit: " + saved.name + (saved.online ? " (online)" : " (OFFLINE)"));
 }
 
 // The shared traffic is initialised HERE, by the backend (the frontend never generates any).

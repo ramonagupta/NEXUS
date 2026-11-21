@@ -19,6 +19,9 @@ const traffic = require("../controllers/trafficController");
 const city = require("../controllers/cityController");
 const arrivalWatcher = require("../utils/arrivalWatcher");
 const Emergency = require("../models/Emergency");
+const hospitals = require("../controllers/hospitalController");
+const controlUnits = require("../controllers/controlUnitController");
+const service = require("../utils/emergencyService");
 
 const report = (title, type, locationNode, peopleCount) =>
   call(emergencies.createEmergency, { body: { title, type, locationNode, address: title, peopleCount } });
@@ -116,7 +119,8 @@ test("2. not enough resources: the priority queue decides who gets the next free
 
 test("a report no hospital can ever take is unassigned, not kept waiting", async () => {
   await call(emergencies.resetEmergencies);
-  const huge = (await report("Mass casualty", "medical", "clock", 40)).body;
+  // all the hospitals together have 96 beds
+  const huge = (await report("Mass casualty", "medical", "clock", 100)).body;
   assert.equal(huge.status, "unassigned");
   assert.equal(huge.queuePosition, null);
 });
@@ -160,4 +164,174 @@ test("the server (not the browser) marks a report ON SCENE when its unit arrives
   const after = (await call(emergencies.getEmergencyById, { params: { id: e.id } })).body;
   assert.equal(after.status, "ON SCENE");
   assert.equal(after.displayStatus, "ON SCENE");
+});
+
+// ---------------------------------------------------------------------------
+// one dispatch shared by several hospitals, beds, the three control units, no "accident"
+// ---------------------------------------------------------------------------
+
+test("more ambulances than one hospital has: the rest come from the next nearest hospital", async () => {
+  await call(emergencies.resetEmergencies);
+  const before = (await call(hospitals.getBeds)).body;
+  assert.equal(before.totalBeds, 96);
+  assert.equal(before.availableBeds, 96);
+
+  // 20 people = 7 ambulances and 20 beds; the biggest hospital has 16 beds
+  const big = (await report("Bus crash", "medical", "clock", 20)).body;
+  assert.equal(big.status, "assigned");
+
+  // the tracker gets one row per hospital that sent ambulances
+  const rows = big.units.filter((u) => u.service === "ambulance" && u.state === "assigned");
+  assert.ok(rows.length >= 2, "more than one hospital was used");
+  assert.equal(rows.reduce((n, r) => n + r.beds, 0), 20); // everybody has a bed
+  assert.ok(rows.reduce((n, r) => n + r.unitsRequired, 0) >= big.unitsNeeded);
+
+  // nearest hospital first, and it was used up to what it has before the next one was asked
+  const times = rows.map((r) => r.totalSeconds);
+  assert.deepEqual(times, [...times].sort((a, b) => a - b));
+  const live = (await engine.getResources()).hospitals;
+  const nearest = live.find((h) => h.name === rows[0].provider);
+  assert.equal(rows[0].beds, nearest.totalBeds);
+  assert.equal(big.routePath.join(), rows[0].routePath.join()); // the map follows the nearest one
+  assert.equal(nearest.availableBeds, 0);
+  assert.equal(big.dispatchedBy, "Central Medical Control");
+
+  // beds are tracked per hospital and in total
+  const during = (await call(hospitals.getBeds)).body;
+  assert.equal(during.availableBeds, 96 - 20);
+  assert.equal(during.occupiedBeds, 20);
+  assert.equal((await summary.buildSummary()).beds.available, 76);
+
+  // resolving gives every hospital its own ambulances and beds back
+  await resolve(big.id);
+  const after = (await call(hospitals.getBeds)).body;
+  assert.equal(after.availableBeds, 96);
+  assert.equal((await summary.buildSummary()).medical.available, 42);
+});
+
+test("there are three control units; one going offline only holds back its own kind of vehicle", async () => {
+  await call(emergencies.resetEmergencies);
+
+  const all = (await call(controlUnits.getAllControlUnits)).body;
+  assert.deepEqual(Object.keys(all), ["medical", "fire", "police"]);
+  assert.equal(all.medical.name, "Central Medical Control");
+  assert.equal(all.fire.name, "Central Fire Control");
+  assert.equal(all.police.name, "Central Police Control");
+  assert.equal(all.fire.fleet.totalUnits, 9);
+  assert.equal(all.police.fleet.totalUnits, 10);
+  assert.equal((await call(controlUnits.getControlUnit)).body.kind, "medical"); // the old route is still medical
+
+  const setOnline = (kind, online) =>
+    service.exclusive(async () => {
+      const unit = (await engine.getControlUnit(kind)).controlUnit;
+      const result = await engine.setControlUnit(unit.name, unit.location, online, kind);
+      return service.applyUpdates(result.updates);
+    });
+
+  await setOnline("fire", false);
+  const fire = (await report("Warehouse fire", "fire", "rail", 2)).body;
+  const police = (await report("Robbery", "police", "rail", 1)).body;
+  const medical = (await report("Collapse", "medical", "rail", 2)).body;
+
+  assert.equal(fire.status, "pending"); // the fire unit is offline: waits
+  assert.equal(police.status, "assigned");
+  assert.equal(police.dispatchedBy, "Central Police Control");
+  assert.equal(medical.status, "assigned");
+  assert.equal(medical.dispatchedBy, "Central Medical Control");
+
+  await setOnline("fire", true); // back online: the waiting fire goes out
+  const sent = (await call(emergencies.getEmergencyById, { params: { id: fire.id } })).body;
+  assert.equal(sent.status, "assigned");
+  assert.equal(sent.dispatchedBy, "Central Fire Control");
+
+  const overview = (await call(controlUnits.getControlUnit, { params: { kind: "fire" } })).body;
+  assert.equal(overview.stats.activeDispatches, 1);
+  const register = (await call(controlUnits.getDispatches, { params: { kind: "police" }, query: { active: "true" } })).body;
+  assert.equal(register.length, 1);
+  assert.equal((await call(controlUnits.getControlUnit, { params: { kind: "water" } })).statusCode, 404);
+});
+
+test("the accident type is gone", async () => {
+  const res = await report("Crash", "accident", "clock", 3);
+  assert.equal(res.statusCode, 400);
+});
+
+// ---------------------------------------------------------------------------
+// the "Additional Help" step of the report form: each kind of help goes through its own control unit
+// ---------------------------------------------------------------------------
+
+test("additional help is sent by the matching control unit, for the people it was asked for", async () => {
+  await call(emergencies.resetEmergencies);
+  const user = { phone: "+919876543210", name: "Asha", save: async () => {} };
+  const send = (body) => call(emergencies.createEmergency, { body: { address: "x", ...body }, user });
+
+  // a fire with 7 people, that also needs an ambulance for 4 of them and the police
+  const fire = (await send({
+    title: "Factory fire", type: "fire", locationNode: "clock", peopleCount: 7, confirmedReal: true,
+    additionalServices: [{ type: "medical", peopleCount: 4 }, { type: "police" }],
+  })).body;
+
+  assert.equal(fire.status, "assigned");
+  assert.equal(fire.unitsNeeded, 1); // the main service: 1 fire engine
+  assert.equal(fire.ambulancesNeeded, 2); // 4 people -> 2 ambulances (not 3 for all 7)
+  const by = (service) => fire.units.filter((u) => u.service === service);
+  assert.equal(by("fire")[0].dispatchedBy, "Central Fire Control");
+  assert.equal(by("police")[0].dispatchedBy, "Central Police Control");
+  assert.equal(by("ambulance")[0].dispatchedBy, "Central Medical Control");
+  assert.equal(by("ambulance").reduce((n, u) => n + u.beds, 0), 4); // beds for 4, not 7
+  assert.deepEqual(fire.controlUnits.sort(), ["Central Fire Control", "Central Medical Control", "Central Police Control"]);
+  assert.deepEqual(fire.additionalServices, [{ type: "medical", peopleCount: 4 }, { type: "police" }]);
+  assert.equal(fire.priorityScore, 7 * 5 + 3 + 2 + 2); // people + medical + fire + police
+  assert.match(fire.reportedBy, /^\+91•+3210$/); // the number is masked for everybody
+
+  // a medical report with help it did not ask for sends nothing extra
+  const plain = (await send({ title: "Fall", type: "medical", locationNode: "rail", peopleCount: 3, confirmedReal: true })).body;
+  assert.deepEqual(plain.units.map((u) => u.service), ["ambulance"]);
+
+  // the same kind of help as the report itself is ignored
+  const same = (await send({ title: "Fall 2", type: "medical", locationNode: "rail", peopleCount: 3, confirmedReal: true,
+    additionalServices: [{ type: "medical", peopleCount: 50 }, { type: "police" }] })).body;
+  assert.equal(same.ambulancesNeeded, 1);
+  assert.deepEqual(same.units.map((u) => u.service).sort(), ["ambulance", "police"]);
+});
+
+test("one control unit offline holds back only the help it sends", async () => {
+  await call(emergencies.resetEmergencies);
+  const setOnline = (kind, online) =>
+    service.exclusive(async () => {
+      const unit = (await engine.getControlUnit(kind)).controlUnit;
+      const result = await engine.setControlUnit(unit.name, unit.location, online, kind);
+      return service.applyUpdates(result.updates);
+    });
+
+  await setOnline("medical", false);
+  const r = (await report("Gas leak", "fire", "clock", 2)).body; // no extras: unaffected
+  assert.equal(r.status, "assigned");
+
+  const withMedical = (await call(emergencies.createEmergency, {
+    body: { title: "Blast", type: "fire", locationNode: "rail", address: "x", peopleCount: 5,
+            additionalServices: [{ type: "medical", peopleCount: 2 }] },
+  })).body;
+  assert.equal(withMedical.status, "partial"); // the fire engine went, the ambulance waits for its unit
+  assert.equal(withMedical.units.find((u) => u.service === "fire").state, "assigned");
+  assert.equal(withMedical.units.find((u) => u.service === "ambulance").state, "waiting");
+
+  await setOnline("medical", true);
+  const after = (await call(emergencies.getEmergencyById, { params: { id: withMedical.id } })).body;
+  assert.equal(after.status, "assigned");
+  assert.equal(after.units.find((u) => u.service === "ambulance").dispatchedBy, "Central Medical Control");
+});
+
+test("bad additional help or an unconfirmed report is refused", async () => {
+  const user = { phone: "+919876543210", save: async () => {} };
+  const bad = (extra) => call(emergencies.createEmergency, {
+    body: { title: "x", type: "fire", locationNode: "clock", address: "x", peopleCount: 1, confirmedReal: true, additionalServices: extra }, user });
+
+  assert.equal((await bad([{ type: "medical" }])).statusCode, 400); // needs peopleCount
+  assert.equal((await bad([{ type: "boat" }])).statusCode, 400);
+  assert.equal((await bad("fire")).statusCode, 400);
+
+  const unconfirmed = await call(emergencies.createEmergency, {
+    body: { title: "x", type: "fire", locationNode: "clock", address: "x", peopleCount: 1 }, user });
+  assert.equal(unconfirmed.statusCode, 400);
 });

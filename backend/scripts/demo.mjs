@@ -68,8 +68,8 @@ async function noQueue() {
   const fire = await report("Shop fire", "fire", "clock", 3);
   show(fire);
 
-  await step("Report a road accident (7 people) at Railway Station: needs 3 ambulances");
-  const crash = await report("Road accident", "medical", "rail", 7);
+  await step("Report a road crash (7 people) at Railway Station: needs 3 ambulances");
+  const crash = await report("Road crash", "medical", "rail", 7);
   show(crash);
 
   await step("Report a robbery at Rajpur");

@@ -1,3 +1,10 @@
+// controllers/hospitalController.js
+// CRUD for hospitals (total beds, ambulances, location).
+// The C++ engine owns the live hospital (availability, dispatch); each change
+// is applied there first, then saved to MongoDB so it survives a restart.
+// New or bigger capacity can let waiting emergencies go straight away, and
+// those are saved too.
+
 const Hospital = require("../models/Hospital");
 const engine = require("../utils/cppEngine");
 const { cleanName, parseCount } = require("../utils/validators");
@@ -5,11 +12,41 @@ const { exclusive, applyUpdates, broadcast } = require("../utils/emergencyServic
 
 const MAX = engine.MAX_FACILITY_COUNT;
 
-
+// List hospitals with live availability
 async function getHospitals(req, res) {
   try {
     const result = await engine.getResources();
     res.json(result.hospitals.map(engine.withNodeId));
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+}
+
+// Hospital beds: how many each hospital has free, and the totals.
+//   GET /api/hospitals/beds   -> { totalBeds, availableBeds, occupiedBeds, hospitals: [...] }
+// Beds are taken when an emergency is dispatched (1 per person, from the hospital that
+// sends the ambulances) and are free again when it is resolved.
+async function getBeds(req, res) {
+  try {
+    const result = await engine.getResources();
+
+    const hospitals = result.hospitals.map((h) => ({
+      name: h.name,
+      area: h.area,
+      location: h.location,
+      locationNode: h.location,
+      totalBeds: h.totalBeds,
+      availableBeds: h.availableBeds,
+      occupiedBeds: h.totalBeds - h.availableBeds,
+    }));
+
+    const sum = (key) => hospitals.reduce((total, h) => total + h[key], 0);
+    res.json({
+      totalBeds: sum("totalBeds"),
+      availableBeds: sum("availableBeds"),
+      occupiedBeds: sum("occupiedBeds"),
+      hospitals,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -52,7 +89,7 @@ async function createHospital(req, res) {
       try {
         await Hospital.create({ name, location, totalBeds, totalAmbulances });
       } catch (dbError) {
-        await engine.hospitalDelete(name);
+        await engine.hospitalDelete(name); // undo, so engine and database agree
         throw dbError;
       }
 
@@ -70,7 +107,7 @@ async function createHospital(req, res) {
   }
 }
 
-
+// Any of location / totalBeds / totalAmbulances can be sent. The name is the id.
 async function updateHospital(req, res) {
   try {
     const existing = await Hospital.findOne({ name: req.params.name });
@@ -140,7 +177,7 @@ async function deleteHospital(req, res) {
       const outcome = await engine.hospitalDelete(req.params.name);
       if (!outcome.ok) return outcome;
 
-
+      // if this fails the hospital comes back on the next restart (MongoDB still has it)
       await Hospital.deleteOne({ name: req.params.name });
       return outcome;
     });
@@ -158,6 +195,7 @@ async function deleteHospital(req, res) {
 
 module.exports = {
   getHospitals,
+  getBeds,
   getHospitalByName,
   createHospital,
   updateHospital,

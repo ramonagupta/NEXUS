@@ -14,7 +14,6 @@ const SERVICE_LABEL = { ambulance: "Ambulance", police: "Police", fire: "Fire en
 // the unit the tracker follows for each type of report
 const PRIMARY_SERVICE = {
   medical: "ambulance",
-  accident: "ambulance",
   fire: "fire",
   police: "police",
   other: "police",
@@ -189,7 +188,8 @@ async function applyReroute(updates) {
 // Give a saved emergency to the engine: it is dispatched right away if units are
 // free, otherwise it waits in the priority queue. Call inside exclusive().
 async function registerInEngine(doc) {
-  const result = await engine.addEmergency(doc.type, doc.injuredPeople, doc.location);
+  const extras = (doc.additionalServices || []).map((x) => ({ type: x.type, peopleCount: x.peopleCount }));
+  const result = await engine.addEmergency(doc.type, doc.injuredPeople, doc.location, extras);
   if (!result.ok) throw new Error(result.error);
 
   link(result.engineId, doc._id.toString());
@@ -212,6 +212,9 @@ async function registerInEngine(doc) {
 // again from scratch if units are free. A record the engine can't take (for
 // example one saved on an older map) is skipped.
 async function syncPendingEmergencies() {
+  // the "accident" type no longer exists: old reports of that type were medical ones (ambulances)
+  await Emergency.updateMany({ type: "accident" }, { $set: { type: "medical" } });
+
   const pending = await Emergency.find({ status: "pending" });
   const partial = await Emergency.find({ status: "partial" });
   const waiting = [...pending, ...partial].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
@@ -247,41 +250,79 @@ async function syncPendingEmergencies() {
 // What the frontend reads
 // ---------------------------------------------------------------------------
 
-// one unit (ambulance / police / fire) of an emergency
-function unitView(service, a, now) {
-  if (!a || a.state === "not_required") return null;
+// The rows the tracker shows for ONE service (ambulance / police / fire) of an emergency.
+// A service that was sent has one row for EVERY station that sent vehicles (the nearest sends
+// what it can, the next nearest the rest); one that is waiting or can't be served has one row.
+// `unitsRequired` of a row = how many vehicles that row stands for.
+function unitViews(service, a, now) {
+  if (!a || a.state === "not_required") return [];
 
-  const assigned = a.state === "assigned";
-  const route = a.route || [];
-  const providerArea = assigned ? (a.routeAreas || [])[0] || a.provider : null;
-  const totalSeconds = assigned ? a.totalSeconds : null;
-  const dispatchedAt = assigned && a.dispatchedAt ? new Date(a.dispatchedAt) : null;
-
-  let elapsedSeconds = 0;
-  if (dispatchedAt) {
-    elapsedSeconds = Math.min(totalSeconds, Math.max(0, Math.floor((now - dispatchedAt.getTime()) / 1000)));
+  if (a.state !== "assigned") {
+    return [
+      {
+        service,
+        unitName: SERVICE_LABEL[service] + " (waiting)",
+        state: a.state, // waiting | unavailable
+        unitsRequired: a.unitsRequired,
+        provider: null,
+        dispatchedBy: null,
+        providerArea: null,
+        dispatchNode: null,
+        routePath: [],
+        routeAreas: [],
+        totalDistanceKm: null,
+        baseTimeSeconds: null,
+        trafficDelaySeconds: null,
+        jammedSegmentCount: null,
+        totalSeconds: null,
+        elapsedSeconds: 0,
+        dispatchedAt: null,
+        isOnSite: false,
+      },
+    ];
   }
 
-  return {
-    service,
-    unitName: SERVICE_LABEL[service] + (assigned ? " · " + providerArea : " (waiting)"),
-    state: a.state, // waiting | assigned | unavailable
-    unitsRequired: a.unitsRequired,
-    provider: a.provider || null, // hospital / station id, e.g. "h4"
-    dispatchedBy: a.dispatchedBy || null, // "Central Medical Control" for every ambulance
-    providerArea, // its name, e.g. "Sahastradhara Xing Hospital"
-    dispatchNode: assigned ? route[0] : null, // where the unit starts
-    routePath: route, // node ids, station first
-    routeAreas: a.routeAreas || [],
-    totalDistanceKm: assigned ? a.distanceKm : null,
-    baseTimeSeconds: assigned ? a.baseTimeSeconds : null,
-    trafficDelaySeconds: assigned ? a.trafficDelaySeconds : null,
-    jammedSegmentCount: assigned ? a.jammedSegmentCount : null,
-    totalSeconds,
-    elapsedSeconds,
-    dispatchedAt,
-    isOnSite: assigned && !!a.isOnSite,
-  };
+  const dispatchedAt = a.dispatchedAt ? new Date(a.dispatchedAt) : null;
+  const legs = a.allocations && a.allocations.length ? a.allocations : [a]; // older records: one station
+
+  return legs.map((leg) => {
+    const route = leg.route || [];
+    const providerArea = (leg.routeAreas || [])[0] || leg.provider || a.provider;
+    const totalSeconds = leg.totalSeconds;
+
+    let elapsedSeconds = 0;
+    if (dispatchedAt) {
+      elapsedSeconds = Math.min(totalSeconds, Math.max(0, Math.floor((now - dispatchedAt.getTime()) / 1000)));
+    }
+
+    return {
+      service,
+      unitName: SERVICE_LABEL[service] + " · " + providerArea,
+      state: "assigned",
+      unitsRequired: leg.units ?? a.unitsRequired, // vehicles this station sends
+      beds: leg.beds || 0, // beds it keeps (ambulances)
+      provider: leg.provider || a.provider || null, // hospital / station id, e.g. "h4"
+      dispatchedBy: a.dispatchedBy || null, // the control unit that sent it
+      providerArea, // its name, e.g. "Sahastradhara Xing Hospital"
+      dispatchNode: route[0],
+      routePath: route,
+      routeAreas: leg.routeAreas || [],
+      totalDistanceKm: leg.distanceKm,
+      baseTimeSeconds: leg.baseTimeSeconds,
+      trafficDelaySeconds: leg.trafficDelaySeconds,
+      jammedSegmentCount: leg.jammedSegmentCount,
+      totalSeconds,
+      elapsedSeconds,
+      dispatchedAt,
+      isOnSite: !!leg.isOnSite,
+    };
+  });
+}
+
+// "+919876543210" -> "+91••••••3210"
+function maskPhone(value) {
+  const text = String(value || "");
+  return /^\+\d{8,}$/.test(text) ? text.slice(0, 3) + "•".repeat(text.length - 7) + text.slice(-4) : text;
 }
 
 // WAITING / DISPATCH / ARRIVING / ON SCENE: the labels the tracker shows
@@ -291,7 +332,7 @@ function displayStatus(status, primary) {
   if (status === "unassigned") return "UNASSIGNED";
   if (status === "pending" || !primary) return "WAITING";
 
-  if (primary.elapsedSeconds >= primary.totalSeconds) return "ON SCENE";
+  // ON SCENE is set by the server once EVERY unit has arrived (arrivalWatcher)
   if (primary.elapsedSeconds > Math.floor(primary.totalSeconds * 0.4)) return "ARRIVING";
   return "DISPATCH";
 }
@@ -302,20 +343,25 @@ function toView(doc, position = null, now = Date.now()) {
   const e = typeof doc.toObject === "function" ? doc.toObject() : doc;
   const assignments = e.assignments || {};
 
-  const units = SERVICES.map((name) => unitView(name, assignments[name], now)).filter(Boolean);
+  const units = SERVICES.flatMap((name) => unitViews(name, assignments[name], now));
 
   // the unit the tracker follows: the main one for this type, else any that was sent
   const sent = units.filter((u) => u.state === "assigned");
   const primary = sent.find((u) => u.service === PRIMARY_SERVICE[e.type]) || sent[0] || null;
 
-  // vehicles this report needs (the frontend shows "3 ambulances")
-  const unitsNeeded = e.ambulancesNeeded || e.policeNeeded || e.fireTrucksNeeded || 1;
+  // vehicles of the MAIN service of this report (the frontend shows "3 ambulances")
+  const mainNeeded = {
+    ambulance: e.ambulancesNeeded,
+    police: e.policeNeeded,
+    fire: e.fireTrucksNeeded,
+  }[PRIMARY_SERVICE[e.type]];
+  const unitsNeeded = mainNeeded || e.ambulancesNeeded || e.policeNeeded || e.fireTrucksNeeded || 1;
 
   return {
     id: String(e._id),
     title: e.title || "",
     description: e.description || "",
-    type: e.type, // fire / police / medical / accident / other
+    type: e.type, // fire / police / medical / other
     address: e.address || "",
 
     locationNode: e.location, // map node id of the locality, e.g. "clock"
@@ -356,7 +402,13 @@ function toView(doc, position = null, now = Date.now()) {
     // every unit of this emergency
     units,
 
-    reportedBy: e.reportedBy,
+    // the extra help that was asked for, and the control units that send everything
+    additionalServices: (e.additionalServices || []).map((x) =>
+      x.type === "medical" ? { type: x.type, peopleCount: x.peopleCount } : { type: x.type }
+    ),
+    controlUnits: [...new Set(units.map((u) => u.dispatchedBy).filter(Boolean))],
+
+    reportedBy: maskPhone(e.reportedBy), // never the full number
     createdAt: e.createdAt,
     updatedAt: e.updatedAt,
   };

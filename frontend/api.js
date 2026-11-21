@@ -165,6 +165,13 @@ export async function verifyOtp({ phone, otp, mode, name }) {
 
 export const getMe = () => request('/auth/me');
 
-export function logout() {
-  clearSession();
+export async function logout() {
+  try {
+    await request('/auth/logout', {
+      method: 'POST',
+      body: {},
+    });
+  } finally {
+    clearSession();
+  }
 }

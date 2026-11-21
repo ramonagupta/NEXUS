@@ -27,17 +27,24 @@
 //   emergency needs (ambulance / police / fire) is assigned as soon as a suitable
 //   unit is free. If none is free the service WAITS in the priority queue and is
 //   given the next free unit, highest priority first. Units come back with RELEASE.
-//   Every AMBULANCE dispatch (hospital resources) is sent by the Central Medical
-//   Control unit; police and fire stations are dispatched directly.
+//   Every dispatch is sent by one of three control units: Central Medical Control
+//   (ambulances, from the hospitals), Central Fire Control (fire engines) and
+//   Central Police Control (police units). If one unit needs more vehicles than the
+//   nearest station has free, the rest come from the second nearest, then the third.
 //
 // Commands (one per line on stdin):
-//   ADD <type> <people> <locationNode>          register an emergency + run the queue
-//                                               (type: medical | accident | fire | police | other)
+//   ADD <type> <people> <locationNode> [medical=<people>] [fire] [police]
+//                                               register an emergency + run the queue
+//                                               (type: medical | fire | police | other)
+//                                               The optional words are the ADDITIONAL HELP the person asked
+//                                               for on the report: medical=3 = ambulances for 3 more people.
+//                                               Each service goes through its own control unit.
 //   QUEUE                                       emergencies still waiting, best first
 //   DISPATCH                                    run the queue again
 //   RELEASE <engineId>                          emergency finished: free its units, run the queue
-//   CONTROL                                     the Central Medical Control unit + the ambulance fleet it controls
-//   CONTROL_SET <name> <node> <online 0|1>      rename / move / switch the control unit on or off
+//   CONTROL [medical|fire|police]               a control unit + the fleet it controls (default: medical)
+//   CONTROL_SET <name> <node> <online 0|1> [medical|fire|police]
+//                                               rename / move / switch a control unit on or off
 //   ROUTE <startNode> <endNode> <vehicle>       fastest route (vehicle: ambulance|police|fire)
 //   CITY                                        nodes, roads (with their traffic) and the map's geo settings
 //   TRAFFIC                                     the traffic: { "<roadId>": vehicles on the road }
@@ -82,8 +89,14 @@ class Emergency
 {
 private:
     int injuredPeople;          // people affected
-    string emergencyType;       // medical | accident | fire | police | other
+    string emergencyType;       // medical | fire | police | other
     string location;            // map node where it happens
+
+    // additional help asked for on the report (a fire that also needs an ambulance ...)
+    int extraMedicalPeople;     // people who need an ambulance and a bed (0 = none asked for)
+    bool extraFire;
+    bool extraPolice;
+    int medicalPeople;          // people the ambulances are for: everybody if the report is medical
 
     int ambulancesNeeded;
     int policeNeeded;
@@ -94,11 +107,17 @@ private:
 
 public:
 
-    Emergency(string type, int injured, string loc)
+    Emergency(string type, int injured, string loc,
+              int medicalExtra = 0, bool fireExtra = false, bool policeExtra = false)
     {
         emergencyType = type;
         injuredPeople = injured;
         location = loc;
+
+        extraMedicalPeople = medicalExtra;
+        extraFire = fireExtra;
+        extraPolice = policeExtra;
+        medicalPeople = 0;
 
         ambulancesNeeded = 0;
         policeNeeded = 0;
@@ -107,31 +126,33 @@ public:
         severityLevel = 1;
     }
 
-    // medical and accident: 1 ambulance for every 3 people
-    // police and other:     1 police unit
-    // fire:                 1 fire truck
+    // What the report needs = its own type + the additional help that was asked for:
+    //   medical (or extra medical): 1 ambulance for every 3 people, and a bed for each
+    //   police and other (or extra police): 1 police unit
+    //   fire (or extra fire): 1 fire truck
     void calculateResources()
     {
         ambulancesNeeded = 0;
         policeNeeded = 0;
         fireTrucksNeeded = 0;
 
-        if (emergencyType == "medical" || emergencyType == "accident")
-            ambulancesNeeded = (injuredPeople + 2) / 3;
-        if (emergencyType == "police" || emergencyType == "other")
+        medicalPeople = (emergencyType == "medical") ? injuredPeople : extraMedicalPeople;
+        if (medicalPeople > 0)
+            ambulancesNeeded = (medicalPeople + 2) / 3;
+        if (emergencyType == "police" || emergencyType == "other" || extraPolice)
             policeNeeded = 1;
-        if (emergencyType == "fire")
+        if (emergencyType == "fire" || extraFire)
             fireTrucksNeeded = 1;
     }
 
-    // priority = injured*5 + medical*3 + fire*2 + police*2
-    // medical is 1 for medical / accident, fire is 1 for fire,
-    // police is 1 for police / accident (same rule as the frontend)
+    // priority = people*5 + medical*3 + fire*2 + police*2
+    // each of medical / fire / police is 1 if that service is needed (the report's own
+    // type, or help that was asked for on top of it)
     void calculatePriorityScore()
     {
-        int medical = (emergencyType == "medical" || emergencyType == "accident") ? 1 : 0;
-        int fire = (emergencyType == "fire") ? 1 : 0;
-        int police = (emergencyType == "police" || emergencyType == "accident") ? 1 : 0;
+        int medical = (ambulancesNeeded > 0) ? 1 : 0;
+        int fire = (fireTrucksNeeded > 0) ? 1 : 0;
+        int police = (emergencyType == "police" || extraPolice) ? 1 : 0;
 
         priorityScore =
             injuredPeople * 5 +
@@ -140,13 +161,13 @@ public:
             police * 2;
     }
 
-    // severity 1-3: fire and medical start at 3, accident and police at 2,
+    // severity 1-3: fire and medical start at 3, police at 2,
     // other at 1, and 10 or more people is always 3 (same rule as the frontend)
     void calculateSeverityLevel()
     {
         if (emergencyType == "fire" || emergencyType == "medical")
             severityLevel = 3;
-        else if (emergencyType == "accident" || emergencyType == "police")
+        else if (emergencyType == "police")
             severityLevel = 2;
         else
             severityLevel = 1;
@@ -168,6 +189,12 @@ public:
     int getInjuredPeople()
     {
         return injuredPeople;
+    }
+
+    // people the ambulances and beds are for
+    int getMedicalPeople()
+    {
+        return medicalPeople;
     }
 
     int getAmbulancesNeeded()
@@ -259,24 +286,19 @@ public:
         return true;
     }
 
-    bool canHandle(Emergency &e)
+    // An emergency can be shared by several hospitals, so each one only
+    // takes (and later gives back) ITS part: some ambulances and some beds.
+    void assignHospital(int ambulances, int beds)
     {
-        return
-            e.getAmbulancesNeeded() <= availableAmbulances &&
-            e.getInjuredPeople() <= availableBeds;
+        availableAmbulances -= ambulances;
+        availableBeds -= beds;
     }
 
-    void assignHospital(Emergency &e)
+    // the emergency is over: this hospital's ambulances and beds are free again
+    void releaseHospital(int ambulances, int beds)
     {
-        availableAmbulances -= e.getAmbulancesNeeded();
-        availableBeds -= e.getInjuredPeople();
-    }
-
-    // the emergency is over: ambulances and beds are free again
-    void releaseHospital(Emergency &e)
-    {
-        availableAmbulances = min(totalAmbulances, availableAmbulances + e.getAmbulancesNeeded());
-        availableBeds = min(totalBeds, availableBeds + e.getInjuredPeople());
+        availableAmbulances = min(totalAmbulances, availableAmbulances + ambulances);
+        availableBeds = min(totalBeds, availableBeds + beds);
     }
 };
 class Hospital1 : public Hospital
@@ -382,22 +404,15 @@ public:
         return true;
     }
 
-    bool canHandle(Emergency &e)
+    // the units this station sends (one emergency can use several stations)
+    void assignPolice(int jeeps)
     {
-        if (outOfService)
-            return false;
-
-        return e.getPoliceNeeded() <= availableJeeps;
+        availableJeeps -= jeeps;
     }
 
-    void assignPolice(Emergency &e)
+    void releasePolice(int jeeps)
     {
-        availableJeeps -= e.getPoliceNeeded();
-    }
-
-    void releasePolice(Emergency &e)
-    {
-        availableJeeps = min(totalJeeps, availableJeeps + e.getPoliceNeeded());
+        availableJeeps = min(totalJeeps, availableJeeps + jeeps);
     }
 };
 class PoliceStation1 : public PoliceStation
@@ -485,23 +500,15 @@ public:
         return true;
     }
 
-    bool canHandle(Emergency &e)
+    // the trucks this station sends (one emergency can use several stations)
+    void assignFireTruck(int trucks)
     {
-        if (outOfService)
-            return false;
-
-        return e.getFireTrucksNeeded()
-               <= availableFireTrucks;
+        availableFireTrucks -= trucks;
     }
 
-    void assignFireTruck(Emergency &e)
+    void releaseFireTruck(int trucks)
     {
-        availableFireTrucks -= e.getFireTrucksNeeded();
-    }
-
-    void releaseFireTruck(Emergency &e)
-    {
-        availableFireTrucks = min(totalFireTrucks, availableFireTrucks + e.getFireTrucksNeeded());
+        availableFireTrucks = min(totalFireTrucks, availableFireTrucks + trucks);
     }
 };
 class FireStation1 : public FireStation
@@ -825,13 +832,24 @@ Route dijkstra(
 //  DSA: emergency storage + priority queue
 // ============================================================
 // What has been assigned to an emergency, one record per service.
+// One station's share of a service: the units (and for ambulances, the beds)
+// it gives, and the route of those units to the scene.
+struct Allocation
+{
+    string provider;   // hospital / station name
+    int units;         // ambulances / police units / fire engines it sends
+    int beds;          // beds it keeps for the patients (ambulances only, else 0)
+    Route route;
+};
+
 struct ServiceAssignment
 {
     int unitsRequired;
     string state;      // "not_required" | "waiting" | "assigned" | "unavailable"
-    string provider;   // hospital / station name, empty until assigned
-    string dispatchedBy;   // the control unit that sent it (ambulances), else empty
-    Route route;
+    string provider;   // the NEAREST station used (first allocation), empty until assigned
+    string dispatchedBy;   // the control unit that sent it, else empty
+    Route route;           // the route of the nearest station (what the tracker follows)
+    vector<Allocation> allocations;   // every station used, nearest first
 };
 
 enum ServiceKind { AMBULANCE = 0, POLICE = 1, FIRE = 2 };
@@ -850,6 +868,7 @@ ServiceAssignment makeService(int unitsRequired)
     a.provider = "";
     a.dispatchedBy = "";
     a.route = {false, 0, {}};
+    a.allocations.clear();
     return a;
 }
 
@@ -863,10 +882,14 @@ priority_queue<pair<int, int>> pq;
 int addEmergency(
     string type,
     int injured,
-    string location)
+    string location,
+    int medicalExtra,
+    bool fireExtra,
+    bool policeExtra)
 {
     Emergency emergency(
-        type,injured,location
+        type,injured,location,
+        medicalExtra,fireExtra,policeExtra
     );
     emergency.calculateResources();
     emergency.calculatePriorityScore();
@@ -890,159 +913,143 @@ int addEmergency(
 }
 
 // ============================================================
-//  Matching: nearest suitable hospital / police / fire station
+//  Matching: nearest stations first, the next nearest for what is left
 // ============================================================
-Hospital* findHospital(
-    Emergency &e,
-    vector<Hospital*> &hospitals,
-    Route &bestRoute)
-{
-    Hospital* best = nullptr;
+// One ambulance carries up to 3 people (same rule as Emergency::calculateResources)
+const int PEOPLE_PER_AMBULANCE = 3;
 
-    double bestTime =
-        numeric_limits<double>::infinity();
-    for (Hospital* h : hospitals)
-    {
-        if (!h->canHandle(e))
-            continue;
-        Route route =
-            dijkstra(
-                h->getLocation(),
-                e.getLocation(),
-                "ambulance"
-            );
-        if (route.found &&
-            route.time < bestTime)
-        {
-            bestTime = route.time;
-            best = h;
-            bestRoute = route;
-        }
-    }
-    return best;
-}
-
-PoliceStation* findPolice(
-    Emergency &e,
-    vector<PoliceStation*> &stations,
-    Route &bestRoute)
+// What a station can give right now (or in total, to check it is possible at all)
+struct Candidate
 {
-    PoliceStation* best = nullptr;
-    double bestTime =
-        numeric_limits<double>::infinity();
-    for (PoliceStation* p : stations)
-    {
-        if (!p->canHandle(e))
-            continue;
-        Route route =
-            dijkstra(
-                p->getLocation(),
-                e.getLocation(),
-                "police"
-            );
-        if (route.found &&
-            route.time < bestTime)
-        {
-            bestTime = route.time;
-            best = p;
-            bestRoute = route;
-        }
-    }
-    return best;
-}
+    string name;
+    string location;
+    int units;    // ambulances / police units / fire engines
+    int beds;     // free beds (hospitals only)
+};
 
-FireStation* findFire(
-    Emergency &e,
-    vector<FireStation*> &stations,
-    Route &bestRoute)
+// Splits one service over the stations, nearest (fastest route under the current
+// traffic) first. If the nearest station can't give everything, the REST comes from the
+// second nearest, then the third, and so on.
+//  - Police and fire: take as many units as the station has free until the units needed are covered.
+//  - Ambulances: a hospital sends ambulances for the people it has beds for
+//    (up to 3 people per ambulance), so ambulances and beds always come from the same hospital.
+// Nothing is changed here. Returns false (and no allocations) if the stations can't
+// cover the whole service right now, so a service is never sent half way.
+bool planAllocation(
+    vector<Candidate> &candidates,
+    int unitsNeeded,
+    int peopleNeeded,        // beds needed, ambulances only (0 for police / fire)
+    bool isAmbulance,
+    const string &vehicle,
+    const string &target,
+    vector<Allocation> &plan)
 {
-    FireStation* best = nullptr;
-    double bestTime =numeric_limits<double>::infinity();
-    for (FireStation* f : stations)
+    plan.clear();
+
+    vector<pair<Candidate, Route>> options;
+    for (Candidate &c : candidates)
     {
-        if (!f->canHandle(e))
+        if (c.units <= 0 || (isAmbulance && c.beds <= 0))
             continue;
-        Route route =
-            dijkstra(
-                f->getLocation(),
-                e.getLocation(),
-                "fire"
-            );
-        if (route.found &&
-            route.time < bestTime)
-        {
-            bestTime = route.time;
-            best = f;
-            bestRoute = route;
-        }
+
+        Route route = dijkstra(c.location, target, vehicle);
+        if (route.found)
+            options.push_back({c, route});
     }
-    return best;
+
+    stable_sort(options.begin(), options.end(),
+        [](const pair<Candidate, Route> &a, const pair<Candidate, Route> &b) {
+            return a.second.time < b.second.time;
+        });
+
+    int unitsLeft = unitsNeeded;
+    int peopleLeft = peopleNeeded;
+
+    for (auto &option : options)
+    {
+        Candidate &c = option.first;
+        int units, beds;
+
+        if (isAmbulance)
+        {
+            if (peopleLeft <= 0)
+                break;
+            beds = min(peopleLeft, min(c.beds, c.units * PEOPLE_PER_AMBULANCE));
+            units = (beds + PEOPLE_PER_AMBULANCE - 1) / PEOPLE_PER_AMBULANCE;
+            peopleLeft -= beds;
+        }
+        else
+        {
+            if (unitsLeft <= 0)
+                break;
+            units = min(c.units, unitsLeft);
+            beds = 0;
+            unitsLeft -= units;
+        }
+
+        plan.push_back({c.name, units, beds, option.second});
+    }
+
+    bool covered = isAmbulance ? (peopleLeft <= 0) : (unitsLeft <= 0);
+    if (!covered)
+        plan.clear();
+    return covered;
 }
 
 // ============================================================
-//  OOP: Central Medical Control
-//  ONE control unit controls the resources of ALL the hospitals (their
-//  ambulances and beds) and sends every ambulance dispatch. Hospitals never
-//  dispatch on their own. If the unit is switched off, no ambulance is sent:
-//  those requests wait in the priority queue until it is back online.
+//  OOP: Central control units (medical, fire, police)
+//  Three control units, one for each kind of emergency, built the same way:
+//    Central Medical Control  controls the ambulances and beds of ALL the hospitals
+//    Central Fire Control     controls the fire engines of ALL the fire stations
+//    Central Police Control   controls the police units of ALL the police stations
+//  Stations never dispatch on their own. If a control unit is switched off, none of
+//  its vehicles is sent: those requests wait in the priority queue until it is back
+//  online (the other two units carry on).
 // ============================================================
-class CentralMedicalControl
+class CentralControl
 {
 private:
+    string kind;                // "medical" | "fire" | "police"
     string name;
     string location;            // city node where the control room sits
     bool online;
-    int ambulanceDispatches;    // dispatches sent since the engine started
+    int dispatches;             // dispatches sent since the engine started
 
 public:
 
-    CentralMedicalControl(string n, string loc)
+    CentralControl(string k, string n, string loc)
     {
+        kind = k;
         name = n;
         location = loc;
         online = true;
-        ambulanceDispatches = 0;
+        dispatches = 0;
     }
 
+    string getKind() { return kind; }
     string getName() { return name; }
     string getLocation() { return location; }
     bool isOnline() { return online; }
-    int getAmbulanceDispatches() { return ambulanceDispatches; }
+    int getDispatches() { return dispatches; }
 
     void setName(string n) { name = n; }
     void setLocation(string loc) { location = loc; }
     void setOnline(bool value) { online = value; }
 
-    // The only place hospital ambulances are dispatched from.
-    // Picks the hospital that can reach the emergency fastest (the matching from
-    // nexus.cpp) and sends its ambulances. Returns nullptr if the unit is offline
-    // or no hospital can take the emergency right now.
-    Hospital* dispatchAmbulances(
-        Emergency &e,
-        vector<Hospital*> &hospitals,
-        Route &route)
-    {
-        if (!online)
-            return nullptr;
-
-        Hospital* hospital = findHospital(e, hospitals, route);
-        if (hospital == nullptr)
-            return nullptr;
-
-        hospital->assignHospital(e);
-        ambulanceDispatches++;
-        return hospital;
-    }
-
-    // the emergency is over: the ambulances and beds go back to their hospital
-    void recallAmbulances(Hospital* hospital, Emergency &e)
-    {
-        if (hospital != nullptr)
-            hospital->releaseHospital(e);
-    }
+    void countDispatch() { dispatches++; }
 };
 
-CentralMedicalControl centralControl("Central Medical Control", "clock");
+CentralControl medicalControl("medical", "Central Medical Control", "clock");
+CentralControl fireControl("fire", "Central Fire Control", "dalanwala");
+CentralControl policeControl("police", "Central Police Control", "karanpur");
+
+CentralControl* findControl(const string &kind)
+{
+    if (kind == "medical") return &medicalControl;
+    if (kind == "fire") return &fireControl;
+    if (kind == "police") return &policeControl;
+    return nullptr;
+}
 
 // ============================================================
 //  Dispatch: give free units to the waiting emergencies, best first
@@ -1051,8 +1058,41 @@ Hospital* lookupHospital(vector<Hospital*> &hospitals, const string &name);
 PoliceStation* lookupPolice(vector<PoliceStation*> &stations, const string &name);
 FireStation* lookupFire(vector<FireStation*> &stations, const string &name);
 
+// the stations of a service as candidates. total=true counts every unit (to check
+// the service is possible at all), total=false only what is free right now.
+vector<Candidate> candidatesFor(
+    int kind,
+    bool total,
+    vector<Hospital*> &hospitals,
+    vector<PoliceStation*> &policeStations,
+    vector<FireStation*> &fireStations)
+{
+    vector<Candidate> list;
+
+    if (kind == AMBULANCE)
+        for (Hospital* h : hospitals)
+            list.push_back({h->getName(), h->getLocation(),
+                            total ? h->getTotalAmbulances() : h->getAvailableAmbulances(),
+                            total ? h->getTotalBeds() : h->getAvailableBeds()});
+    else if (kind == POLICE)
+        for (PoliceStation* p : policeStations)
+        {
+            if (p->isOutOfService() && !total) continue;
+            list.push_back({p->getName(), p->getLocation(),
+                            total ? p->getTotalJeeps() : p->getAvailableJeeps(), 0});
+        }
+    else
+        for (FireStation* f : fireStations)
+        {
+            if (f->isOutOfService() && !total) continue;
+            list.push_back({f->getName(), f->getLocation(),
+                            total ? f->getTotalFireTrucks() : f->getAvailableFireTrucks(), 0});
+        }
+    return list;
+}
+
 // Could this service NEVER be served, even if every unit were free?
-// (e.g. more beds needed than any hospital has). Those are not kept waiting.
+// (e.g. more people than all the hospitals have beds). Those are not kept waiting.
 bool serviceImpossible(
     int kind,
     Emergency &e,
@@ -1060,29 +1100,24 @@ bool serviceImpossible(
     vector<PoliceStation*> &policeStations,
     vector<FireStation*> &fireStations)
 {
+    vector<Candidate> all = candidatesFor(kind, true, hospitals, policeStations, fireStations);
+
     if (kind == AMBULANCE)
     {
-        for (Hospital* h : hospitals)
-            if (h->getTotalAmbulances() >= e.getAmbulancesNeeded() &&
-                h->getTotalBeds() >= e.getInjuredPeople())
-                return false;
-        return true;
+        int people = 0;
+        for (Candidate &c : all)
+            people += min(c.beds, c.units * PEOPLE_PER_AMBULANCE);
+        return people < e.getMedicalPeople();
     }
-    if (kind == POLICE)
-    {
-        for (PoliceStation* p : policeStations)
-            if (p->getTotalJeeps() >= e.getPoliceNeeded())
-                return false;
-        return true;
-    }
-    for (FireStation* f : fireStations)
-        if (f->getTotalFireTrucks() >= e.getFireTrucksNeeded())
-            return false;
-    return true;
+
+    int units = 0;
+    for (Candidate &c : all)
+        units += c.units;
+    return units < (kind == POLICE ? e.getPoliceNeeded() : e.getFireTrucksNeeded());
 }
 
-// Try to assign ONE service of an emergency right now (same matching as
-// nexus.cpp: nearest suitable hospital / station by Dijkstra).
+// Try to assign ONE service of an emergency right now: the nearest station sends what
+// it can and the next nearest sends the rest (nearest by Dijkstra under the current traffic).
 // Returns true if the service is settled ("assigned", or "unavailable" when it
 // can never be served), false if it has to keep waiting.
 bool tryAssignService(
@@ -1094,48 +1129,42 @@ bool tryAssignService(
 {
     Emergency &e = emergencies[index];
     ServiceAssignment &s = states[index].service[kind];
-    Route route;
 
-    if (kind == AMBULANCE)
+    // each kind of vehicle is sent by its own control unit
+    CentralControl &control =
+        kind == AMBULANCE ? medicalControl : (kind == POLICE ? policeControl : fireControl);
+
+    // offline: the request waits until the control unit is back online
+    if (!control.isOnline())
+        return false;
+
+    const char* vehicles[3] = {"ambulance", "police", "fire"};
+    int unitsNeeded = kind == AMBULANCE ? e.getAmbulancesNeeded()
+                    : (kind == POLICE ? e.getPoliceNeeded() : e.getFireTrucksNeeded());
+
+    vector<Candidate> free = candidatesFor(kind, false, hospitals, policeStations, fireStations);
+    vector<Allocation> plan;
+
+    if (planAllocation(free, unitsNeeded, kind == AMBULANCE ? e.getMedicalPeople() : 0,
+                       kind == AMBULANCE, vehicles[kind], e.getLocation(), plan))
     {
-        // every ambulance is sent by the central control unit
-        Hospital* hospital = centralControl.dispatchAmbulances(e, hospitals, route);
-        if (hospital != nullptr)
+        for (Allocation &a : plan)
         {
-            s.state = "assigned";
-            s.provider = hospital->getName();
-            s.dispatchedBy = centralControl.getName();
-            s.route = route;
-            return true;
+            if (kind == AMBULANCE)
+                lookupHospital(hospitals, a.provider)->assignHospital(a.units, a.beds);
+            else if (kind == POLICE)
+                lookupPolice(policeStations, a.provider)->assignPolice(a.units);
+            else
+                lookupFire(fireStations, a.provider)->assignFireTruck(a.units);
         }
 
-        // offline: the request waits until the control unit is back online
-        if (!centralControl.isOnline())
-            return false;
-    }
-    else if (kind == POLICE)
-    {
-        PoliceStation* station = findPolice(e, policeStations, route);
-        if (station != nullptr)
-        {
-            station->assignPolice(e);
-            s.state = "assigned";
-            s.provider = station->getName();
-            s.route = route;
-            return true;
-        }
-    }
-    else
-    {
-        FireStation* station = findFire(e, fireStations, route);
-        if (station != nullptr)
-        {
-            station->assignFireTruck(e);
-            s.state = "assigned";
-            s.provider = station->getName();
-            s.route = route;
-            return true;
-        }
+        control.countDispatch();
+        s.state = "assigned";
+        s.provider = plan[0].provider;      // the nearest station: the tracker follows its route
+        s.route = plan[0].route;
+        s.allocations = plan;
+        s.dispatchedBy = control.getName();
+        return true;
     }
 
     if (serviceImpossible(kind, e, hospitals, policeStations, fireStations))
@@ -1210,7 +1239,6 @@ void releaseEmergency(
     vector<FireStation*> &fireStations)
 {
     EmergencyState &st = states[index];
-    Emergency &e = emergencies[index];
 
     for (int kind = 0; kind < 3; kind++)
     {
@@ -1218,20 +1246,24 @@ void releaseEmergency(
         if (s.state != "assigned")
             continue;
 
-        if (kind == AMBULANCE)
+        // every station that sent units gets its own units (and beds) back
+        for (Allocation &a : s.allocations)
         {
-            Hospital* h = lookupHospital(hospitals, s.provider);
-            centralControl.recallAmbulances(h, e);
-        }
-        else if (kind == POLICE)
-        {
-            PoliceStation* p = lookupPolice(policeStations, s.provider);
-            if (p != nullptr) p->releasePolice(e);
-        }
-        else
-        {
-            FireStation* f = lookupFire(fireStations, s.provider);
-            if (f != nullptr) f->releaseFireTruck(e);
+            if (kind == AMBULANCE)
+            {
+                Hospital* h = lookupHospital(hospitals, a.provider);
+                if (h != nullptr) h->releaseHospital(a.units, a.beds);
+            }
+            else if (kind == POLICE)
+            {
+                PoliceStation* p = lookupPolice(policeStations, a.provider);
+                if (p != nullptr) p->releasePolice(a.units);
+            }
+            else
+            {
+                FireStation* f = lookupFire(fireStations, a.provider);
+                if (f != nullptr) f->releaseFireTruck(a.units);
+            }
         }
     }
 
@@ -1286,6 +1318,7 @@ string emergencyToJson(Emergency &e)
         << "\"location\":" << jsonStr(e.getLocation()) << ","
         << "\"areaName\":" << jsonStr(getAreaName(e.getLocation())) << ","
         << "\"injuredPeople\":" << e.getInjuredPeople() << ","
+        << "\"medicalPeople\":" << e.getMedicalPeople() << ","
         << "\"ambulancesNeeded\":" << e.getAmbulancesNeeded() << ","
         << "\"policeNeeded\":" << e.getPoliceNeeded() << ","
         << "\"fireTrucksNeeded\":" << e.getFireTrucksNeeded() << ","
@@ -1349,14 +1382,35 @@ string routeFieldsToJson(const Route &route)
            ",\"isOnSite\":" + (route.isOnSite ? "true" : "false");
 }
 
+// every station that sent units, nearest first, each with its own route
+string allocationsToJson(const vector<Allocation> &list)
+{
+    string out = "[";
+    for (size_t i = 0; i < list.size(); i++)
+    {
+        if (i > 0) out += ",";
+        out += "{\"provider\":" + jsonStr(list[i].provider) +
+               ",\"units\":" + to_string(list[i].units) +
+               ",\"beds\":" + to_string(list[i].beds) +
+               "," + routeFieldsToJson(list[i].route) + "}";
+    }
+    return out + "]";
+}
+
 string assignmentToJson(const ServiceAssignment &a)
 {
+    int unitsSent = 0;
+    for (const Allocation &x : a.allocations)
+        unitsSent += x.units;
+
     ostringstream out;
     out << "{"
         << "\"unitsRequired\":" << a.unitsRequired << ","
+        << "\"unitsSent\":" << unitsSent << ","
         << "\"state\":" << jsonStr(a.state) << ","
         << "\"provider\":" << (a.provider.empty() ? "null" : jsonStr(a.provider)) << ","
         << "\"dispatchedBy\":" << (a.dispatchedBy.empty() ? "null" : jsonStr(a.dispatchedBy)) << ","
+        << "\"allocations\":" << allocationsToJson(a.allocations) << ","
         << routeFieldsToJson(a.route)
         << "}";
     return out.str();
@@ -1408,9 +1462,28 @@ string handleAdd(
     int injured;
 
     if (!(in >> type >> injured >> location))
-        return errorJson("Usage: ADD <type> <people> <locationNode>");
+        return errorJson("Usage: ADD <type> <people> <locationNode> [medical=<people>] [fire] [police]");
 
-    if (type != "medical" && type != "accident" && type != "fire" &&
+    // the additional help asked for on the report
+    int medicalExtra = 0;
+    bool fireExtra = false, policeExtra = false;
+    string word;
+    while (in >> word)
+    {
+        if (word == "fire")
+            fireExtra = true;
+        else if (word == "police")
+            policeExtra = true;
+        else if (word.rfind("medical=", 0) == 0 && word.size() > 8 &&
+                 word.size() <= 15 && word.find_first_not_of("0123456789", 8) == string::npos)
+            medicalExtra = stoi(word.substr(8));
+        else
+            return errorJson("Unknown option: " + word);
+    }
+    if (medicalExtra > MAX_PEOPLE)
+        return errorJson("medical people must be between 1 and " + to_string(MAX_PEOPLE));
+
+    if (type != "medical" && type != "fire" &&
         type != "police" && type != "other")
         return errorJson("Invalid emergency type: " + type);
 
@@ -1420,7 +1493,7 @@ string handleAdd(
     if (!isKnownNode(location))
         return errorJson("Unknown location node: " + location);
 
-    int index = addEmergency(type, injured, location);
+    int index = addEmergency(type, injured, location, medicalExtra, fireExtra, policeExtra);
 
     // dispatch straight away if units are free, otherwise it waits in the queue
     vector<int> changed = runQueue(hospitals, policeStations, fireStations);
@@ -1492,51 +1565,104 @@ string handleRelease(
 
 string urlDecode(const string &s);   // defined with the hospital / station commands below
 
-// the control unit + the whole ambulance fleet it controls
-string controlUnitToJson(vector<Hospital*> &hospitals)
+// a control unit + the whole fleet it controls
+string controlUnitToJson(
+    CentralControl &control,
+    vector<Hospital*> &hospitals,
+    vector<PoliceStation*> &policeStations,
+    vector<FireStation*> &fireStations)
 {
-    int totalAmbulances = 0, availableAmbulances = 0, totalBeds = 0, availableBeds = 0;
-    for (Hospital* h : hospitals)
+    string loc = control.getLocation();
+    string kind = control.getKind();
+
+    string head = "{\"kind\":" + jsonStr(kind) +
+                  ",\"name\":" + jsonStr(control.getName()) +
+                  ",\"location\":" + jsonStr(loc) +
+                  ",\"area\":" + jsonStr(getAreaName(loc)) +
+                  ",\"online\":" + (control.isOnline() ? "true" : "false") +
+                  ",\"dispatches\":" + to_string(control.getDispatches());
+
+    if (kind == "medical")
     {
-        totalAmbulances += h->getTotalAmbulances();
-        availableAmbulances += h->getAvailableAmbulances();
-        totalBeds += h->getTotalBeds();
-        availableBeds += h->getAvailableBeds();
+        int totalAmbulances = 0, availableAmbulances = 0, totalBeds = 0, availableBeds = 0;
+        for (Hospital* h : hospitals)
+        {
+            totalAmbulances += h->getTotalAmbulances();
+            availableAmbulances += h->getAvailableAmbulances();
+            totalBeds += h->getTotalBeds();
+            availableBeds += h->getAvailableBeds();
+        }
+
+        return head +
+               ",\"ambulanceDispatches\":" + to_string(control.getDispatches()) +
+               ",\"fleet\":{\"hospitals\":" + to_string(hospitals.size()) +
+               ",\"totalAmbulances\":" + to_string(totalAmbulances) +
+               ",\"availableAmbulances\":" + to_string(availableAmbulances) +
+               ",\"busyAmbulances\":" + to_string(totalAmbulances - availableAmbulances) +
+               ",\"totalBeds\":" + to_string(totalBeds) +
+               ",\"availableBeds\":" + to_string(availableBeds) +
+               ",\"occupiedBeds\":" + to_string(totalBeds - availableBeds) + "}}";
     }
 
-    string loc = centralControl.getLocation();
+    int stations = 0, total = 0, available = 0;
+    if (kind == "police")
+        for (PoliceStation* p : policeStations)
+        {
+            stations++;
+            total += p->getTotalJeeps();
+            if (!p->isOutOfService()) available += p->getAvailableJeeps();
+        }
+    else
+        for (FireStation* f : fireStations)
+        {
+            stations++;
+            total += f->getTotalFireTrucks();
+            if (!f->isOutOfService()) available += f->getAvailableFireTrucks();
+        }
 
-    return "{\"name\":" + jsonStr(centralControl.getName()) +
-           ",\"location\":" + jsonStr(loc) +
-           ",\"area\":" + jsonStr(getAreaName(loc)) +
-           ",\"online\":" + (centralControl.isOnline() ? "true" : "false") +
-           ",\"ambulanceDispatches\":" + to_string(centralControl.getAmbulanceDispatches()) +
-           ",\"fleet\":{\"hospitals\":" + to_string(hospitals.size()) +
-           ",\"totalAmbulances\":" + to_string(totalAmbulances) +
-           ",\"availableAmbulances\":" + to_string(availableAmbulances) +
-           ",\"busyAmbulances\":" + to_string(totalAmbulances - availableAmbulances) +
-           ",\"totalBeds\":" + to_string(totalBeds) +
-           ",\"availableBeds\":" + to_string(availableBeds) + "}}";
+    return head +
+           ",\"fleet\":{\"stations\":" + to_string(stations) +
+           ",\"totalUnits\":" + to_string(total) +
+           ",\"availableUnits\":" + to_string(available) +
+           ",\"busyUnits\":" + to_string(total - available) + "}}";
 }
 
-string handleControl(vector<Hospital*> &hospitals)
+// CONTROL [medical|fire|police]   (no kind = the medical unit, as before)
+string handleControl(
+    istringstream &in,
+    vector<Hospital*> &hospitals,
+    vector<PoliceStation*> &policeStations,
+    vector<FireStation*> &fireStations)
 {
-    return "{\"ok\":true,\"controlUnit\":" + controlUnitToJson(hospitals) + "}";
+    string kind = "medical";
+    in >> kind;
+
+    CentralControl* control = findControl(kind);
+    if (control == nullptr)
+        return errorJson("Unknown control unit: " + kind + " (medical, fire or police)");
+
+    return "{\"ok\":true,\"controlUnit\":" +
+           controlUnitToJson(*control, hospitals, policeStations, fireStations) + "}";
 }
 
-// switching the unit back on (or moving it) runs the queue, so the ambulance
-// requests that were waiting go out straight away
+// switching a unit back on (or moving it) runs the queue, so the requests that
+// were waiting for it go out straight away
 string handleControlSet(
     istringstream &in,
     vector<Hospital*> &hospitals,
     vector<PoliceStation*> &policeStations,
     vector<FireStation*> &fireStations)
 {
-    string name, location;
+    string name, location, kind = "medical";
     int online;
 
     if (!(in >> name >> location >> online))
-        return errorJson("Usage: CONTROL_SET <name> <node> <online 0|1>");
+        return errorJson("Usage: CONTROL_SET <name> <node> <online 0|1> [medical|fire|police]");
+    in >> kind;
+
+    CentralControl* control = findControl(kind);
+    if (control == nullptr)
+        return errorJson("Unknown control unit: " + kind + " (medical, fire or police)");
 
     name = urlDecode(name);
 
@@ -1547,12 +1673,13 @@ string handleControlSet(
     if (online != 0 && online != 1)
         return errorJson("online must be 0 or 1");
 
-    centralControl.setName(name);
-    centralControl.setLocation(location);
-    centralControl.setOnline(online == 1);
+    control->setName(name);
+    control->setLocation(location);
+    control->setOnline(online == 1);
 
     vector<int> changed = runQueue(hospitals, policeStations, fireStations);
-    return "{\"ok\":true,\"controlUnit\":" + controlUnitToJson(hospitals) +
+    return "{\"ok\":true,\"controlUnit\":" +
+           controlUnitToJson(*control, hospitals, policeStations, fireStations) +
            ",\"updates\":" + updatesToJson(changed) + "}";
 }
 
@@ -1723,18 +1850,28 @@ string handleReroute()
         for (int kind = 0; kind < 3; kind++)
         {
             ServiceAssignment &s = st.service[kind];
-            if (s.state != "assigned" || !s.route.found || s.route.path.empty())
+            if (s.state != "assigned")
                 continue;
 
-            Route fresh = dijkstra(s.route.path.front(), emergencies[index].getLocation(), vehicles[kind]);
-            if (!fresh.found)
-                continue;
-
-            if (fresh.path != s.route.path || lround(fresh.time) != lround(s.route.time))
+            // every station that sent units keeps its place, the route is worked out again
+            for (Allocation &a : s.allocations)
             {
-                s.route = fresh;
-                changedHere = true;
+                if (!a.route.found || a.route.path.empty())
+                    continue;
+
+                Route fresh = dijkstra(a.route.path.front(), emergencies[index].getLocation(), vehicles[kind]);
+                if (!fresh.found)
+                    continue;
+
+                if (fresh.path != a.route.path || lround(fresh.time) != lround(a.route.time))
+                {
+                    a.route = fresh;
+                    changedHere = true;
+                }
             }
+
+            if (!s.allocations.empty())
+                s.route = s.allocations[0].route;   // the nearest station is what the tracker follows
         }
         if (changedHere)
             changed.push_back(index);
@@ -1891,7 +2028,8 @@ string hospitalToJson(Hospital *h)
            ",\"totalAmbulances\":" + to_string(h->getTotalAmbulances()) +
            ",\"availableAmbulances\":" + to_string(h->getAvailableAmbulances()) +
            ",\"totalBeds\":" + to_string(h->getTotalBeds()) +
-           ",\"availableBeds\":" + to_string(h->getAvailableBeds()) + "}";
+           ",\"availableBeds\":" + to_string(h->getAvailableBeds()) +
+           ",\"occupiedBeds\":" + to_string(h->getTotalBeds() - h->getAvailableBeds()) + "}";
 }
 
 string stationToJson(
@@ -2238,7 +2376,7 @@ int main()
         else if (command == "CITY")
             response = handleCity();
         else if (command == "CONTROL")
-            response = handleControl(hospitals);
+            response = handleControl(in, hospitals, policeStations, fireStations);
         else if (command == "CONTROL_SET")
             response = handleControlSet(in, hospitals, policeStations, fireStations);
         else if (command == "RELEASE")

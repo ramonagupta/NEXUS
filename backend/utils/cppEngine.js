@@ -10,9 +10,12 @@ const readline = require("readline");
 const path = require("path");
 const fs = require("fs");
 
-// the report types the frontend sends. "accident" is handled as medical and
-// "other" as police (the engine knows all five).
-const EMERGENCY_TYPES = ["fire", "police", "medical", "accident", "other"];
+// the report types the frontend sends ("other" is handled as police)
+const EMERGENCY_TYPES = ["fire", "police", "medical", "other"];
+// the help that can be asked for on top of a report (each one is sent by its own control unit)
+const EXTRA_SERVICES = ["medical", "fire", "police"];
+// one control unit for each kind of emergency
+const CONTROL_KINDS = ["medical", "fire", "police"];
 const VEHICLES = ["ambulance", "police", "fire"];
 const RESOURCE_TYPES = ["police", "fire"];
 const TRAFFIC_LEVELS = ["free", "full", "light", "medium", "heavy", "custom"];
@@ -171,8 +174,11 @@ function enc(name) {
 
 // ---- one small function per engine command ----
 
-function addEmergency(type, injuredPeople, location) {
-  return send("ADD " + type + " " + injuredPeople + " " + location);
+// extras = the additional help asked for on the report:
+//   [{ type: "medical", peopleCount: 3 }, { type: "fire" }, { type: "police" }]
+function addEmergency(type, injuredPeople, location, extras = []) {
+  const words = extras.map((x) => (x.type === "medical" ? "medical=" + x.peopleCount : x.type));
+  return send(("ADD " + type + " " + injuredPeople + " " + location + " " + words.join(" ")).trim());
 }
 
 function getQueue() {
@@ -241,14 +247,15 @@ function reroute() {
   return send("REROUTE");
 }
 
-// ---- Central Medical Control ----
+// ---- Central Medical / Fire / Police Control ----
+// kind: "medical" (default), "fire" or "police"
 
-function getControlUnit() {
-  return send("CONTROL");
+function getControlUnit(kind = "medical") {
+  return send("CONTROL " + kind);
 }
 
-function setControlUnit(name, location, online) {
-  return send("CONTROL_SET " + enc(name) + " " + location + " " + (online ? 1 : 0));
+function setControlUnit(name, location, online, kind = "medical") {
+  return send("CONTROL_SET " + enc(name) + " " + location + " " + (online ? 1 : 0) + " " + kind);
 }
 
 // ---- hospitals ----
@@ -289,6 +296,8 @@ function clearFacilities() {
 
 module.exports = {
   EMERGENCY_TYPES,
+  EXTRA_SERVICES,
+  CONTROL_KINDS,
   VEHICLES,
   RESOURCE_TYPES,
   TRAFFIC_LEVELS,

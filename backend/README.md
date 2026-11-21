@@ -5,7 +5,7 @@ Node.js + Express + MongoDB, with a **C++ engine** that does all the dispatching
 - **Express (Node)** handles HTTP, checks input and saves records.
 - **The C++ engine** (`engine/nexus_engine.cpp`) holds the logic: the city graph, the traffic-aware
   Dijkstra, the priority queue, matching each emergency to the nearest suitable unit, the waiting
-  queue and the Central Medical Control unit. Node starts it once and keeps it running.
+  queue and the three control units (medical, fire, police). Node starts it once and keeps it running.
 - **MongoDB** stores the records: emergencies, hospitals, resources, the control unit and the traffic.
 
 The backend decides **everything**; the frontend only draws it. That includes the map, the traffic
@@ -84,16 +84,18 @@ Each of these answers with the new traffic and `reroutedEmergencies` (how many r
 data/         cityMap.mjs: the map (source of truth)
 engine/       nexus_engine.cpp: all the logic.  city_data.h: the map (generated)
 scripts/      generate-city-data.mjs, demo.mjs (the two dispatch demos against a running server)
-tests/        flow.test.js: runs the real engine and controllers with an in-memory database (npm test)
+tests/        flow.test.js (dispatch) and auth.test.js (sign in): in-memory database (npm test)
 utils/        cppEngine.js: starts the C++ program and talks to it (no logic)
               emergencyService.js: saves what the engine decided, builds the JSON the frontend reads
               trafficService.js: saves traffic, re-routes units when it changes
               arrivalWatcher.js: marks a report ON SCENE when its unit arrives
               cityMap.js: the road curves for GET /api/city/map
-              facilitySync.js: loads saved hospitals / resources / control unit and sets up traffic at startup
+              facilitySync.js: loads saved hospitals / resources / control units and sets up traffic at startup
               resourceSummary.js, events.js, validators.js
-models/       Emergency, Hospital, Resource, ControlUnit, Traffic
-controllers/  emergency, traffic, resource, hospital, controlUnit, city
+              phone.js, jwt.js, smsService.js, rateLimit.js, prankWarning.js: sign-in (see "Sign in")
+middleware/   auth.js: requireAuth / optionalAuth (checks the JWT)
+models/       Emergency, Hospital, Resource, ControlUnit, Traffic, User, OtpRequest
+controllers/  emergency, traffic, resource, hospital, controlUnit, city, auth
 routes/       one file per controller
 config/       MongoDB connection
 server.js     entry point
@@ -105,18 +107,32 @@ server.js     entry point
 
 | type | units sent | how many |
 |---|---|---|
-| `medical`, `accident` | ambulances from a hospital | 1 per 3 people (rounded up) |
+| `medical` | ambulances from the hospitals | 1 per 3 people (rounded up) |
 | `police`, `other` | police unit | 1 |
 | `fire` | fire engine | 1 |
 
-**Priority score** = `people*5 + medical*3 + fire*2 + police*2`, where *medical* is 1 for medical and
-accident, *fire* is 1 for fire, *police* is 1 for police and accident.
-**Severity** (1 to 3): fire and medical start at 3, accident and police at 2, other at 1; 10 or more
+**Priority score** = `people*5 + medical*3 + fire*2 + police*2`, where *medical* is 1 for medical,
+*fire* is 1 for fire, *police* is 1 for police.
+**Severity** (1 to 3): fire and medical start at 3, police at 2, other at 1; 10 or more
 people is always 3.
 
-**Registering a report dispatches it straight away if a unit is free.** The engine picks the
-station of the right type with the fastest route under the current traffic. A hospital must have
-enough free ambulances and beds (1 bed per person) for the whole report.
+**Registering a report dispatches it straight away if units are free.** The engine starts with the
+station of the right type that has the fastest route under the current traffic, and takes what it can
+from it. **If that station can't give everything the report needs, the rest comes from the second
+nearest, then the third, and so on** (nearest = fastest route under the current traffic).
+
+- **Ambulances:** a hospital sends ambulances for the people it has free beds for (1 bed per person, up to
+  3 people per ambulance), so a hospital's ambulances and beds always go together. Example: 20 people need
+  7 ambulances and 20 beds, and the biggest hospital has 16 beds: it sends what it has and the next nearest
+  hospital takes the other 4 people. If beds are spread thinly, one ambulance more than the usual
+  `ceil(people / 3)` can be needed (`unitsSent` says how many went).
+- **Fire engines and police units:** a report needs 1 unit today, so one station is enough. The same
+  splitting is built in and starts working as soon as a report needs more units than one station has.
+- It is all or nothing: if the stations together can't cover the whole report right now, nothing is
+  taken and it waits in the queue (nobody holds units they can't use).
+- Every report returns one `units` row per station used, nearest first, each with its `unitsRequired`
+  (vehicles it sends), `beds`, route and ETA. The single-unit fields (`routePath`, `totalSeconds` ...) follow
+  the nearest one. A report is ON SCENE when the last of its units has arrived.
 
 **If no unit is free the report waits in the priority queue.** Whenever something changes (a new
 report, a resolved one, a hospital or resource added or edited, the control unit switched on) the
@@ -134,13 +150,20 @@ out in that order.
 freed units go to the top of the waiting queue. Dispatching does not change the traffic: the traffic
 is whatever the map sets.
 
-### Central Medical Control unit
+### The three control units
 
-One control unit (`CentralMedicalControl` in C++) controls the ambulances and beds of **all** the
-hospitals and sends **every ambulance dispatch** (medical and accident reports). It sits at a map
-node (default: `clock`, Clock Tower). Switch it offline and no ambulance is sent: those reports
-wait in the queue while police and fire carry on. Switch it online and the waiting ones go out,
-highest priority first. Every ambulance carries `dispatchedBy`.
+There is one control unit for each kind of emergency (`CentralControl` in C++). Each one controls **all**
+the stations of its kind and sends **every dispatch** of its kind:
+
+| unit | kind | controls | default place |
+|---|---|---|---|
+| Central Medical Control | `medical` | the ambulances and beds of all the hospitals | `clock` |
+| Central Fire Control | `fire` | the fire engines of all the fire stations | `dalanwala` |
+| Central Police Control | `police` | the police units of all the police stations | `karanpur` |
+
+Switch one offline and none of **its** vehicles is sent: those reports wait in the queue while the other
+two units carry on. Switch it online and the waiting ones go out, highest priority first. Every unit
+sent carries `dispatchedBy` (the name of the control unit).
 
 ### Status
 
@@ -171,9 +194,19 @@ highest priority first. Every ambulance carries `dispatchedBy`.
 **POST /api/emergencies** body (what the frontend sends):
 ```json
 { "title": "Shop fire", "type": "fire", "locationNode": "clock",
-  "address": "Opposite Clock Tower", "peopleCount": 7, "lat": 30.3165, "lng": 78.0322 }
+  "address": "Opposite Clock Tower", "peopleCount": 7, "confirmedReal": true,
+  "additionalServices": [ { "type": "medical", "peopleCount": 4 }, { "type": "police" } ] }
 ```
-`type`: `fire`, `police`, `medical`, `accident`, `other`. `peopleCount`: a number from 1 to 100000
+**Additional help** (the form's second step): a `fire` report can also ask for `medical` and `police`, a
+`medical` one for `fire` and `police`, a `police` one for `medical` and `fire`. `medical` carries the number
+of people who need an ambulance (4 people = 2 ambulances and 4 beds, even if 7 are affected); `fire` and
+`police` are one unit each. **Every kind of help is sent by its own control unit**: ambulances by Central
+Medical Control, fire engines by Central Fire Control, police by Central Police Control. If one unit is
+offline only its help waits (the report is `partial`) and the rest goes out. The priority score counts
+every service needed. Help of the same kind as the report itself is ignored. Each row of `units` is one
+station that sent vehicles (`unitsRequired` = how many it sends, `dispatchedBy` = the control unit), and
+`controlUnits` lists the units involved.
+`type`: `fire`, `police`, `medical`, `other` (the form offers the first three). `peopleCount`: a number from 1 to 100000
 (a fraction is rounded down). `lat` / `lng` are worked out from the node if left out.
 `severityLevel`, `priorityScore`, `unitsNeeded` and `dispatchedAt` may be sent but are ignored:
 the engine works them out, and the server records the real dispatch time. The older field names
@@ -190,7 +223,7 @@ Each report comes back with:
 | `status`, `displayStatus`, `queuePosition` | `queuePosition` is null unless the report is waiting |
 | `dispatchedAt` | when the first unit was sent (the countdown starts here, so a refresh doesn't restart it) |
 | `unitName`, `dispatchNode`, `routePath`, `totalDistanceKm`, `baseTimeSeconds`, `trafficDelaySeconds`, `totalSeconds`, `jammedSegmentCount`, `isOnSite`, `elapsedSeconds` | the main unit for this type (what the tracker shows); null until one is sent |
-| `units` | every unit: `service`, `state` (`waiting` / `assigned` / `unavailable`), `provider`, `dispatchedBy`, route, distance, times |
+| `units` | one row per station that sent vehicles (several when the nearest ran short) or one per service that waits: `service`, `state` (`waiting` / `assigned` / `unavailable`), `unitsRequired`, `beds`, `provider`, `providerArea`, `dispatchedBy`, route, distance, times |
 
 `DELETE` and `PATCH ... resolved` return `{ emergency, dispatchedFromQueue }`; `dispatchedFromQueue`
 lists the waiting reports that got the freed units. `PATCH ... ON SCENE` only works once a unit
@@ -213,13 +246,20 @@ and `?sort=priority` (default) `|status|newest`.
 **Control unit**
 | Method | Endpoint | |
 |---|---|---|
-| GET | /api/control-unit | the unit, the fleet it controls, its dispatch numbers |
-| PUT | /api/control-unit | change `name`, `location`, or `status` (`online` / `offline`) |
-| GET | /api/control-unit/dispatches | its dispatch register (`?active=true` for open ones) |
+| GET | /api/control-unit/all | the three units: `{ medical, fire, police }` |
+| GET | /api/control-unit/:kind | one unit (`medical`, `fire` or `police`): the fleet it controls, its dispatch numbers |
+| PUT | /api/control-unit/:kind | change `name`, `location`, or `status` (`online` / `offline`) |
+| GET | /api/control-unit/:kind/dispatches | its dispatch register (`?active=true` for open ones); `stations` lists every station that sent units |
+
+`/api/control-unit` with no kind is still the medical unit (`GET`, `PUT`, `/dispatches`).
 
 **Hospitals** (`/api/hospitals`) and **resources** (`/api/resources`, police and fire stations) have
 create / read / update / delete, with the station's `name` as the id. Hospital body:
-`{ "name": "City Care", "location": "clock", "totalBeds": 10, "totalAmbulances": 4 }`. Resource body:
+`{ "name": "City Care", "location": "clock", "totalBeds": 10, "totalAmbulances": 4 }`.
+**Beds:** every hospital shows `totalBeds`, `availableBeds` and `occupiedBeds`, and
+`GET /api/hospitals/beds` gives them for all hospitals with the totals. `GET /api/resources` also carries
+`beds: { available, total }`. A bed is taken when a report is dispatched (1 per person, at the hospital that
+sends the ambulances) and is free again when the report is resolved. Resource body:
 `{ "name": "Metro Fire", "type": "fire", "location": "clock", "capacity": 2 }`. Capacity can't be reduced
 below what is in use (409). A resource's `status` is `available`, `busy` (all units out) or
 `unavailable` (switched off; you can set `available` or `unavailable`).
@@ -229,9 +269,39 @@ Built in: 8 hospitals `h1`-`h8` (h1, h2: 8 ambulances / 16 beds; h3, h4: 3 / 8; 
 stations `p1`-`p5` (2 units each) and 3 fire stations `f1`-`f3` (3 engines each), at the map nodes of the
 same name: 42 ambulances, 10 police units, 9 fire engines.
 
+## Sign in (phone number + OTP, JWT)
+
+This is what the frontend's sign-up / log-in screen calls. Set `JWT_SECRET` (32+ characters) in `.env`; see
+`.env.example` for the SMS provider (`console` prints the code in the server log, `twilio` sends a real SMS).
+With `DEV_RETURN_OTP=true` the code is also returned, and the screen shows "Demo mode: your code is ...".
+
+| Method | Endpoint | |
+|---|---|---|
+| POST | /api/auth/send-otp | `{ "phone": "+919876543210", "mode": "signup" or "login" }` sends a 6-digit code by SMS |
+| POST | /api/auth/verify-otp | `{ phone, otp, mode, name }` (name for sign up) gives `{ token, tokenType, expiresInSeconds, user, warning }` |
+| GET | /api/auth/me | the signed-in user itself: `{ id, name, phone, ... }` (header `Authorization: Bearer <token>`) |
+| POST | /api/auth/logout | ends every sign-in of this user |
+| GET | /api/auth/warning | the prank warning text |
+
+- **Sign up** needs a name and a number with no account (`409 ALREADY_REGISTERED` otherwise). **Log in** needs a
+  number that has one (`404 NOT_REGISTERED`). This is checked before the SMS is sent.
+- **Every `/api` route except `/api/auth` needs the token** (`401` without it; the frontend then goes back to the
+  login screen). `AUTH_REQUIRED=false` in `.env` switches that off for `curl` and `scripts/demo.mjs`.
+- **The prank warning** is accepted on the screen (a tick-box when signing up, a notice after every log in). The
+  server saves when (`warningAcceptedAt`), blocks numbers marked `blocked: true` on their `User` (no code, tokens
+  stop working), asks for `confirmedReal: true` on every report made by a signed-in person, and stores the
+  person's phone number and name with the report. Other people only ever see the number masked
+  (`+91••••••3210`).
+- **Protections:** the code is made with `crypto.randomInt` and only its HMAC is saved; it works for 5 minutes,
+  once, and 5 tries; one new code per phone every 30 seconds and 5 an hour; a wrong or expired code gets the same
+  answer; the sign-in routes also have a per-IP limit; the JWT (HS256, 7 days) holds only the user id and a
+  version number that `logout` raises. Numbers are saved as `+919876543210`.
+- **Not built:** the frontend's optional Firebase mode (`VITE_AUTH_PROVIDER=firebase`, `POST /api/auth/session`).
+  The default mode (`backend`) is what is implemented.
+
 ## What is saved and what resets
 
-Saved in MongoDB: reports, hospitals, resources, the control unit, the traffic. At startup the engine
+Saved in MongoDB: reports, hospitals, resources, the three control units, the traffic, users and pending OTPs. At startup the engine
 is loaded from them, so changes survive a restart. Live state lives in the C++ process: which units
 are busy and the waiting queue. After a restart, reports that were still `pending` or `partial` go
 back into the queue (oldest first) and are dispatched again; reports already `assigned` keep their
@@ -240,8 +310,8 @@ map (unknown node ids) are cleaned up at startup.
 
 ## Limits
 
-- A report must be served by **one hospital** (enough ambulances and beds for everyone). More than
-  16 people (the biggest hospitals have 16 beds) is therefore `unassigned`.
+- A report is `unassigned` straight away if all the hospitals together could never take it (more people
+  than the 96 beds of the 8 built-in hospitals).
 - A unit's route is worked out when it is dispatched and again whenever the traffic changes
   (same station, new fastest route); a waiting report gets its station and route when a unit is free.
 - Traffic is last-write-wins: two screens editing it at once overwrite each other.
@@ -249,7 +319,7 @@ map (unknown node ids) are cleaned up at startup.
 ## Tests and demos
 
 ```
-npm test                      # 7 tests: both dispatch situations, traffic, re-routing, arrival (no MongoDB needed)
+npm test                      # 19 tests: dispatch (sharing one report between hospitals, the three control units, additional help), traffic, re-routing, arrival, sign up / log in (no MongoDB needed)
 node scripts/demo.mjs         # the same two situations against the running server, step by step
 ```
 See [../DEMO.md](../DEMO.md).

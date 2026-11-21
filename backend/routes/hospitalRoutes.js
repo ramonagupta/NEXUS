@@ -1,10 +1,11 @@
-
+// routes/hospitalRoutes.js
 
 const express = require("express");
 const router = express.Router();
 
 const {
   getHospitals,
+  getBeds,
   getHospitalByName,
   createHospital,
   updateHospital,
@@ -13,6 +14,7 @@ const {
 
 router.post("/", createHospital);
 router.get("/", getHospitals);
+router.get("/beds", getBeds); // before "/:name"
 router.get("/:name", getHospitalByName);
 router.put("/:name", updateHospital);
 router.delete("/:name", deleteHospital);

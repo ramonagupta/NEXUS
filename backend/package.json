@@ -10,14 +10,15 @@
     "predev": "npm run build:engine",
     "dev": "nodemon server.js --ignore engine/",
     "generate:city": "node scripts/generate-city-data.mjs",
-    "test": "npm run build:engine && node --test tests/flow.test.js",
+    "test": "npm run build:engine && node --test \"tests/*.test.js\"",
     "demo": "node scripts/demo.mjs"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "mongoose": "^8.5.0",
+    "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "cors": "^2.8.5"
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^8.5.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"

@@ -1,3 +1,9 @@
+// controllers/emergencyController.js
+// Registers emergencies in MongoDB and hands the real work (resource calculation,
+// priority queue, matching, Dijkstra, waiting for free units) to the C++ engine.
+// An emergency is dispatched as soon as it is registered if units are free;
+// otherwise it waits in the engine's priority queue.
+
 const Emergency = require("../models/Emergency");
 const engine = require("../utils/cppEngine");
 const { parsePeople } = require("../utils/validators");
@@ -14,11 +20,42 @@ function fail(res, error) {
 
 const finite = (value) => typeof value === "number" && Number.isFinite(value);
 
+// The additional help asked for on the report (the frontend's "Additional Help" step):
+//   [{ type: "medical", peopleCount: 3 }, { type: "fire" }, { type: "police" }]
+// Help of the same kind as the report itself is ignored (a medical report already sends
+// ambulances for everybody). Returns { list } or { error }.
+function parseAdditionalServices(value, mainType) {
+  if (value === undefined || value === null) return { list: [] };
+  if (!Array.isArray(value) || value.length > engine.EXTRA_SERVICES.length) {
+    return { error: "additionalServices must be a list like [{ \"type\": \"fire\" }]" };
+  }
 
+  const list = [];
+  for (const item of value) {
+    const type = String(item && item.type ? item.type : "").trim().toLowerCase();
+    if (!engine.EXTRA_SERVICES.includes(type)) {
+      return { error: "additionalServices type must be one of: " + engine.EXTRA_SERVICES.join(", ") };
+    }
+    if (type === mainType || list.some((x) => x.type === type)) continue;
 
+    if (type === "medical") {
+      const peopleCount = parsePeople(item.peopleCount, engine.MAX_PEOPLE);
+      if (peopleCount === null) {
+        return { error: "medical help needs peopleCount: how many people need medical attention (1 to " + engine.MAX_PEOPLE + ")" };
+      }
+      list.push({ type, peopleCount });
+    } else {
+      list.push({ type });
+    }
+  }
+  return { list };
+}
 
-
-
+// Register an emergency. Accepts what the frontend sends:
+//   { title, type, locationNode, address, peopleCount, confirmedReal, additionalServices, lat, lng, ... }
+// and also { description, injuredPeople, location, reportedBy }.
+// severityLevel, priorityScore, unitsNeeded and dispatchedAt may be sent but are
+// ignored: the engine works them out and the server decides when units are sent.
 async function createEmergency(req, res) {
   try {
     const body = req.body;
@@ -38,11 +75,19 @@ async function createEmergency(req, res) {
       return res.status(400).json({ message: "locationNode must be a valid map node (see GET /api/city/map)" });
     }
 
+    const extras = parseAdditionalServices(body.additionalServices, type);
+    if (extras.error) return res.status(400).json({ message: extras.error });
 
+    // a signed-in person has to confirm it is a real emergency (the prank warning)
+    if (req.user && body.confirmedReal !== true) {
+      return res.status(400).json({ message: "Please confirm that this emergency is happening right now" });
+    }
+
+    // the map position: sent by the frontend, otherwise worked out from the node
     const lat = finite(body.lat) ? body.lat : engine.latLngOf(location).lat;
     const lng = finite(body.lng) ? body.lng : engine.latLngOf(location).lng;
 
-
+    // save first, so a database failure never leaves a ghost entry in the engine queue
     const doc = await Emergency.create({
       type,
       title: String(body.title ?? "").trim(),
@@ -52,7 +97,11 @@ async function createEmergency(req, res) {
       location,
       lat,
       lng,
-      reportedBy: body.reportedBy,
+      additionalServices: extras.list,
+      confirmedReal: body.confirmedReal === true,
+      // the signed-in person (their number is attached to the report), else what was sent
+      reportedBy: req.user ? req.user.phone : body.reportedBy,
+      reporterName: req.user ? req.user.name || "" : "",
       status: "pending",
     });
 
@@ -76,10 +125,10 @@ async function createEmergency(req, res) {
   }
 }
 
-
-
-
-
+// List emergencies. By default only the open ones (everything not resolved), which
+// is what the map shows.
+//   ?status=all | pending | partial | assigned | unassigned | ON SCENE | resolved
+//   ?sort=priority (default) | status | newest
 async function getEmergencies(req, res) {
   try {
     const { sort = "priority" } = req.query;
@@ -135,8 +184,8 @@ async function getEmergencyById(req, res) {
   }
 }
 
-
-
+// The emergencies still waiting for units, in the engine's priority order.
+// Position 1 gets the next free unit.
 async function getPriorityQueue(req, res) {
   try {
     const result = await engine.getQueue();
@@ -154,9 +203,9 @@ async function getPriorityQueue(req, res) {
   }
 }
 
-
-
-
+// Run the waiting queue again. This already happens whenever something changes
+// (a new emergency, a resolved one, a hospital or resource added / edited), so it
+// is only needed as a manual "try again".
 async function dispatchWaiting(req, res) {
   try {
     const changed = await service.exclusive(async () => {
@@ -176,11 +225,11 @@ async function dispatchWaiting(req, res) {
   }
 }
 
-
-
-
-
-
+// ---------------------------------------------------------------------------
+// Closing an emergency (resolved): its units go back to their station and the
+// freed units go to the highest priority emergency that is waiting.
+// Returns { emergency, dispatchedFromQueue }, or null if it doesn't exist.
+// ---------------------------------------------------------------------------
 async function resolveEmergency(id) {
   const doc = await Emergency.findById(id);
   if (!doc) return null;
@@ -221,11 +270,11 @@ async function sendResolved(res, outcome) {
   });
 }
 
-
-
-
-
-
+// Move an emergency on by hand. Body: { status }
+//   "ON SCENE" (or in-progress): the unit has arrived. Only once units were sent.
+//   "resolved":                  it is over (same as DELETE).
+// Used as PATCH /api/emergencies/:id (what the frontend calls) and
+// PATCH /api/emergencies/:id/status.
 async function updateEmergencyStatus(req, res) {
   try {
     const status = service.normalizeStatus(req.body.status);
@@ -264,8 +313,8 @@ async function updateEmergencyStatus(req, res) {
   }
 }
 
-
-
+// DELETE /api/emergencies/:id  "Mark resolved": the record is kept (as resolved,
+// so the dispatch history stays) and no longer shows in the open list.
 async function deleteEmergency(req, res) {
   try {
     const outcome = await resolveEmergency(req.params.id);
@@ -276,15 +325,15 @@ async function deleteEmergency(req, res) {
   }
 }
 
-
-
-
+// POST /api/emergencies/reset   resolve EVERY open emergency: all units go back to their
+// stations and the waiting queue is emptied. Used to start a demo from a clean state.
+// The records stay (as resolved).
 async function resetEmergencies(req, res) {
   try {
     const open = await Emergency.find({ status: { $ne: "resolved" } });
     let resolved = 0;
 
-
+    // lowest priority first, so units freed on the way are not handed to reports that are about to close
     open.sort((a, b) => a.priorityScore - b.priorityScore);
     for (const doc of open) {
       await resolveEmergency(doc._id);

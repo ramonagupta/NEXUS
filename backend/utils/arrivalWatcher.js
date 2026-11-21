@@ -10,16 +10,21 @@ const service = require("./emergencyService");
 
 const CHECK_EVERY_MS = 1000;
 
-// has the unit the tracker follows (the main one for this type of report) arrived?
+// Have all the units that were sent arrived? A report can have several kinds of unit
+// (ambulance, fire engine, police) and each can come from several stations: it is ON SCENE
+// when the last of them gets there.
 function hasArrived(doc, now) {
   const sent = ["ambulance", "police", "fire"]
-    .map((name) => ({ name, a: doc.assignments ? doc.assignments[name] : null }))
-    .filter((x) => x.a && x.a.state === "assigned" && x.a.dispatchedAt);
+    .map((name) => (doc.assignments ? doc.assignments[name] : null))
+    .filter((a) => a && a.state === "assigned" && a.dispatchedAt);
 
   if (sent.length === 0) return false;
 
-  const main = sent.find((x) => x.name === service.PRIMARY_SERVICE[doc.type]) || sent[0];
-  return (now - new Date(main.a.dispatchedAt).getTime()) / 1000 >= main.a.totalSeconds;
+  return sent.every((a) => {
+    const seconds = (now - new Date(a.dispatchedAt).getTime()) / 1000;
+    const legs = a.allocations && a.allocations.length ? a.allocations : [a];
+    return legs.every((leg) => seconds >= leg.totalSeconds);
+  });
 }
 
 async function check() {
