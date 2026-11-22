@@ -23,7 +23,6 @@ private:
     int priorityScore;
 
 public:
-
     Emergency(string type, int injured, string loc)
     {
         emergencyType = type;
