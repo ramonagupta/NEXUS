@@ -100,7 +100,7 @@ private:
 
     int ambulancesNeeded;
     int policeNeeded;
-    int fireTrucksNeeded;
+    int fireTrucksNeeded; 
 
     int priorityScore;
     int severityLevel;
